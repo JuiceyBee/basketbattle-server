@@ -3,6 +3,36 @@ const https = require("https");
 const fs = require("fs");
 const fetch = require("node-fetch");
 
+/* ============================================================
+   UPSTASH REDIS — replaces all JSON file storage
+   Uses the simple HTTP REST API, no SDK needed.
+   ============================================================ */
+const UPSTASH_URL   = process.env.UPSTASH_REDIS_REST_URL;
+const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
+
+async function redisGet(key) {
+  if (!UPSTASH_URL) return null;
+  try {
+    const res = await fetch(`${UPSTASH_URL}/get/${encodeURIComponent(key)}`, {
+      headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` },
+    });
+    const data = await res.json();
+    if (data.result === null || data.result === undefined) return null;
+    return JSON.parse(data.result);
+  } catch(e) { console.warn("[Redis] GET error:", e.message); return null; }
+}
+
+async function redisSet(key, value) {
+  if (!UPSTASH_URL) return;
+  try {
+    await fetch(`${UPSTASH_URL}/set/${encodeURIComponent(key)}`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${UPSTASH_TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ value: JSON.stringify(value) }),
+    });
+  } catch(e) { console.warn("[Redis] SET error:", e.message); }
+}
+
 const PORT = process.env.PORT || 3000;
 const agent = new https.Agent({ rejectUnauthorized: false });
 
@@ -1089,127 +1119,55 @@ async function addToColesCart(items) {
 }
 
 /* ============================================================
-   SSE + shared list + shared shop
+   SSE
    ============================================================ */
-let householdLists = {};   // { code: { coles:[], woolworths:[] } }
-let householdShops = {};   // { code: { coles:[], woolworths:[] } }
 const sseClients = new Set();
-const sseClientCodes = new Map(); // client res -> householdCode
-
-function getList(code) {
-  if (!code) return { coles: [], woolworths: [] };
-  return householdLists[code] || { coles: [], woolworths: [] };
-}
-function setList(code, data) {
-  if (!code) return;
-  householdLists[code] = data;
-  saveListsToDisk();
-  broadcast('list-update', { code, list: data }, code);
-}
-function getShop(code) {
-  if (!code) return { coles: [], woolworths: [] };
-  return householdShops[code] || { coles: [], woolworths: [] };
-}
-function setShop(code, data) {
-  if (!code) return;
-  householdShops[code] = data;
-  saveShopsToDisk();
-  broadcast('shop-update', { code, shopList: data }, code);
-}
+const sseClientCodes = new Map();
 
 /* ============================================================
-   HOUSEHOLD BATTLES PERSISTENCE
+   STORAGE — Upstash Redis (replaces all JSON file I/O)
+   Keys: bb:battles:CODE, bb:list:CODE, bb:shop:CODE, bb:history:CODE
    ============================================================ */
-const BATTLES_FILE = DATA_DIR + "/battles.json";
-const LISTS_FILE   = DATA_DIR + "/lists.json";
-const SHOPS_FILE   = DATA_DIR + "/shops.json";
-const HISTORY_FILE = DATA_DIR + "/history.json";
-let allHouseholdBattles = {};
-let householdHistory = {}; // { code: [ { id, date, coles: {total, items}, woolworths: {total, items} } ] }
 
-function loadBattlesFromDisk() {
-  try {
-    if (fs.existsSync(BATTLES_FILE)) {
-      allHouseholdBattles = JSON.parse(fs.readFileSync(BATTLES_FILE, "utf8"));
-      console.log("[Battles] Loaded", Object.keys(allHouseholdBattles).length, "household(s) from disk.");
-    }
-  } catch(e) { console.warn("[Battles] Could not load battles:", e.message); }
+async function getList(code) {
+  if (!code) return { coles: [], woolworths: [] };
+  return (await redisGet("bb:list:" + code.toUpperCase())) || { coles: [], woolworths: [] };
 }
-
-function saveBattlesToDisk() {
-  try { fs.writeFileSync(BATTLES_FILE, JSON.stringify(allHouseholdBattles, null, 2)); }
-  catch(e) { console.warn("[Battles] Could not save battles:", e.message); }
+async function setList(code, data) {
+  if (!code) return;
+  await redisSet("bb:list:" + code.toUpperCase(), data);
+  broadcast("list-update", { code, list: data }, code);
 }
-
-function loadListsFromDisk() {
-  try {
-    if (fs.existsSync(LISTS_FILE)) {
-      householdLists = JSON.parse(fs.readFileSync(LISTS_FILE, "utf8"));
-      console.log("[Lists] Loaded", Object.keys(householdLists).length, "household(s) from disk.");
-    }
-  } catch(e) { console.warn("[Lists] Could not load lists:", e.message); }
+async function getShop(code) {
+  if (!code) return { coles: [], woolworths: [] };
+  return (await redisGet("bb:shop:" + code.toUpperCase())) || { coles: [], woolworths: [] };
 }
-
-function saveListsToDisk() {
-  try { fs.writeFileSync(LISTS_FILE, JSON.stringify(householdLists, null, 2)); }
-  catch(e) { console.warn("[Lists] Could not save lists:", e.message); }
+async function setShop(code, data) {
+  if (!code) return;
+  await redisSet("bb:shop:" + code.toUpperCase(), data);
+  broadcast("shop-update", { code, shopList: data }, code);
 }
-
-function loadShopsFromDisk() {
-  try {
-    if (fs.existsSync(SHOPS_FILE)) {
-      householdShops = JSON.parse(fs.readFileSync(SHOPS_FILE, "utf8"));
-      console.log("[Shops] Loaded", Object.keys(householdShops).length, "household(s) from disk.");
-    }
-  } catch(e) { console.warn("[Shops] Could not load shops:", e.message); }
-}
-
-function saveShopsToDisk() {
-  try { fs.writeFileSync(SHOPS_FILE, JSON.stringify(householdShops, null, 2)); }
-  catch(e) { console.warn("[Shops] Could not save shops:", e.message); }
-}
-
-function loadHistoryFromDisk() {
-  try {
-    if (fs.existsSync(HISTORY_FILE)) {
-      householdHistory = JSON.parse(fs.readFileSync(HISTORY_FILE, "utf8"));
-      console.log("[History] Loaded", Object.keys(householdHistory).length, "household(s) from disk.");
-    }
-  } catch(e) { console.warn("[History] Could not load history:", e.message); }
-}
-
-function saveHistoryToDisk() {
-  try { fs.writeFileSync(HISTORY_FILE, JSON.stringify(householdHistory, null, 2)); }
-  catch(e) { console.warn("[History] Could not save history:", e.message); }
-}
-
-function getHistory(code) {
+async function getHistory(code) {
   if (!code) return [];
-  return householdHistory[code.toUpperCase()] || [];
+  return (await redisGet("bb:history:" + code.toUpperCase())) || [];
 }
-
-function addHistory(code, entry) {
+async function addHistory(code, entry) {
   if (!code) return;
   const key = code.toUpperCase();
-  if (!householdHistory[key]) householdHistory[key] = [];
-  householdHistory[key].unshift(entry); // newest first
-  // Keep max 50 entries per household
-  if (householdHistory[key].length > 50) householdHistory[key] = householdHistory[key].slice(0, 50);
-  saveHistoryToDisk();
-  broadcast('history-update', { code: key, history: householdHistory[key] }, key);
+  let history = (await redisGet("bb:history:" + key)) || [];
+  history.unshift(entry);
+  if (history.length > 50) history = history.slice(0, 50);
+  await redisSet("bb:history:" + key, history);
+  broadcast("history-update", { code: key, history }, key);
 }
-
-function getBattles(code) {
+async function getBattles(code) {
   if (!code) return [];
-  return allHouseholdBattles[code.toUpperCase()] || [];
+  return (await redisGet("bb:battles:" + code.toUpperCase())) || [];
 }
-
-function setBattles(code, groups) {
+async function setBattles(code, groups) {
   if (!code) return;
-  allHouseholdBattles[code.toUpperCase()] = groups;
-  saveBattlesToDisk();
-  // broadcast to all clients with this household code
-  broadcast('battles-update', { code: code.toUpperCase(), groups });
+  await redisSet("bb:battles:" + code.toUpperCase(), groups);
+  broadcast("battles-update", { code: code.toUpperCase(), groups });
 }
 
 function broadcast(event, data, targetCode) {
@@ -1289,12 +1247,13 @@ const server = http.createServer(async (req, res) => {
     if (!code) { res.writeHead(400, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "No household code" })); return; }
     if (req.method === "GET") {
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ groups: getBattles(code) }));
+      const battleGroups = await getBattles(code);
+      res.end(JSON.stringify({ groups: battleGroups }));
       return;
     }
     if (req.method === "POST") {
       const body = await parseBody(req);
-      setBattles(code, body.groups || []);
+      await setBattles(code, body.groups || []);
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true }));
       return;
@@ -1305,12 +1264,13 @@ const server = http.createServer(async (req, res) => {
     const code = parsed.searchParams.get("code") || "";
     if (req.method === "GET") {
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(getList(code)));
+      const listData = await getList(code);
+      res.end(JSON.stringify(listData));
       return;
     }
     if (req.method === "POST") {
       const body = await parseBody(req);
-      if (code) setList(code, body);
+      if (code) await setList(code, body);
       res.writeHead(200); res.end("ok");
       return;
     }
@@ -1320,12 +1280,13 @@ const server = http.createServer(async (req, res) => {
     const code = parsed.searchParams.get("code") || "";
     if (req.method === "GET") {
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(getShop(code)));
+      const shopData = await getShop(code);
+      res.end(JSON.stringify(shopData));
       return;
     }
     if (req.method === "POST") {
       const body = await parseBody(req);
-      if (code) setShop(code, body);
+      if (code) await setShop(code, body);
       res.writeHead(200); res.end("ok");
       return;
     }
@@ -1336,12 +1297,13 @@ const server = http.createServer(async (req, res) => {
     if (!code) { res.writeHead(400); res.end("No code"); return; }
     if (req.method === "GET") {
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ history: getHistory(code) }));
+      const histData = await getHistory(code);
+      res.end(JSON.stringify({ history: histData }));
       return;
     }
     if (req.method === "POST") {
       const body = await parseBody(req);
-      if (body.entry) addHistory(code, body.entry);
+      if (body.entry) await addHistory(code, body.entry);
       res.writeHead(200); res.end("ok");
       return;
     }
@@ -1678,10 +1640,7 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, async () => {
   console.log("Basket Battle running on port", PORT);
   loadCookiesFromDisk();
-  loadBattlesFromDisk();
-  loadListsFromDisk();
-  loadShopsFromDisk();
-  loadHistoryFromDisk();
+  console.log("[Redis] Using Upstash at", UPSTASH_URL ? UPSTASH_URL.split(".")[0] + "..." : "NOT CONFIGURED");
   setTimeout(async () => {
     for (const store of ['coles', 'woolworths']) {
       if (auth[store].loggedIn && auth[store].cookies) {
