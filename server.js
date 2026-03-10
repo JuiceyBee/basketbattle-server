@@ -1316,6 +1316,19 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  if (path === "/history/replace") {
+    const code = parsed.searchParams.get("code") || "";
+    if (!code) { res.writeHead(400); res.end("No code"); return; }
+    if (req.method === "POST") {
+      const body = await parseBody(req);
+      if (Array.isArray(body.history)) {
+        await redisSet("bb:history:" + code.toUpperCase(), body.history);
+      }
+      res.writeHead(200); res.end("ok");
+      return;
+    }
+  }
+
   if (path === "/auth/status") {
     const code = parsed.searchParams.get("code") || "";
     if (code) applyHouseholdAuth(code);
