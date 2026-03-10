@@ -13,8 +13,11 @@ const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
 async function redisGet(key) {
   if (!UPSTASH_URL) return null;
   try {
-    const res = await fetch(`${UPSTASH_URL}/get/${encodeURIComponent(key)}`, {
-      headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` },
+    // POST ["GET", key] to root URL — correct Upstash REST format
+    const res = await fetch(UPSTASH_URL, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${UPSTASH_TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify(["GET", key]),
     });
     const data = await res.json();
     if (data.result === null || data.result === undefined) return null;
@@ -25,11 +28,11 @@ async function redisGet(key) {
 async function redisSet(key, value) {
   if (!UPSTASH_URL) return;
   try {
-    // Upstash REST API: POST /pipeline with array of commands
-    await fetch(`${UPSTASH_URL}/pipeline`, {
+    // POST ["SET", key, value] to root URL — correct Upstash REST format
+    await fetch(UPSTASH_URL, {
       method: "POST",
       headers: { Authorization: `Bearer ${UPSTASH_TOKEN}`, "Content-Type": "application/json" },
-      body: JSON.stringify([["SET", key, JSON.stringify(value)]]),
+      body: JSON.stringify(["SET", key, JSON.stringify(value)]),
     });
   } catch(e) { console.warn("[Redis] SET error:", e.message); }
 }
