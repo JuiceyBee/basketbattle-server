@@ -1248,6 +1248,14 @@ const server = http.createServer(async (req, res) => {
 
   if (path === "/ping") { res.writeHead(200); res.end("ok"); return; }
 
+  if (path === "/buildid") {
+    // Ensure we have a fresh buildId
+    await refreshColes();
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ buildId: session.coles.buildId, cookies: session.coles.cookies }));
+    return;
+  }
+
   if (path === "/specials") {
     const page = parseInt(parsed.searchParams.get("page") || "1", 10);
     let colesError = null, woolworthsError = null, coles = [], woolworths = [];
