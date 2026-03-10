@@ -28,12 +28,15 @@ async function redisGet(key) {
 async function redisSet(key, value) {
   if (!UPSTASH_URL) return;
   try {
-    // POST ["SET", key, value] to root URL — correct Upstash REST format
-    await fetch(UPSTASH_URL, {
+    const body = JSON.stringify(["SET", key, JSON.stringify(value)]);
+    console.log("[Redis] SET", key, "body length:", body.length);
+    const res = await fetch(UPSTASH_URL, {
       method: "POST",
       headers: { Authorization: `Bearer ${UPSTASH_TOKEN}`, "Content-Type": "application/json" },
-      body: JSON.stringify(["SET", key, JSON.stringify(value)]),
+      body,
     });
+    const data = await res.json();
+    console.log("[Redis] SET response:", JSON.stringify(data));
   } catch(e) { console.warn("[Redis] SET error:", e.message); }
 }
 
