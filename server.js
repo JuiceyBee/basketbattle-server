@@ -1,6 +1,7 @@
 const http = require("http");
 const https = require("https");
 const fs = require("fs");
+const fetch = require("node-fetch");
 
 const PORT = 3000;
 const agent = new https.Agent({ rejectUnauthorized: false });
