@@ -25,10 +25,11 @@ async function redisGet(key) {
 async function redisSet(key, value) {
   if (!UPSTASH_URL) return;
   try {
-    await fetch(`${UPSTASH_URL}/set/${encodeURIComponent(key)}`, {
+    // Upstash REST API: POST /pipeline with array of commands
+    await fetch(`${UPSTASH_URL}/pipeline`, {
       method: "POST",
       headers: { Authorization: `Bearer ${UPSTASH_TOKEN}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ value: JSON.stringify(value) }),
+      body: JSON.stringify([["SET", key, JSON.stringify(value)]]),
     });
   } catch(e) { console.warn("[Redis] SET error:", e.message); }
 }
