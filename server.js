@@ -1629,15 +1629,21 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (path === "/") {
-    try { res.writeHead(200, { "Content-Type": "text/html" }); res.end(fs.readFileSync("index.html")); }
-    catch(e) { res.writeHead(404); res.end("index.html not found"); }
+    try {
+      const html = fs.readFileSync("index.html");
+      res.writeHead(200, { "Content-Type": "text/html" });
+      res.end(html);
+    } catch(e) {
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.end("BasketBattle server is running.");
+    }
     return;
   }
 
   res.writeHead(404); res.end();
 });
 
-server.listen(PORT, async () => {
+server.listen(PORT, "0.0.0.0", async () => {
   console.log("Basket Battle running on port", PORT);
   loadCookiesFromDisk();
   console.log("[Redis] Using Upstash at", UPSTASH_URL ? UPSTASH_URL.split(".")[0] + "..." : "NOT CONFIGURED");
