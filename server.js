@@ -1317,7 +1317,8 @@ function parseBody(req) {
 const server = http.createServer(async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  // ════════════════════════════════════════════════════════════════════════════
+ 
+// ════════════════════════════════════════════════════════════════════════════
 //  PASTE THIS BLOCK to REPLACE the existing "/ping" line and CORS header line:
 //
 //    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -1428,6 +1429,7 @@ const server = http.createServer(async (req, res) => {
 // ════════════════════════════════════════════════════════════════════════════
 // Continue with existing routes below this point (specials, search, etc.)
 // ════════════════════════════════════════════════════════════════════════════
+
 
 
   if (path === "/specials") {
