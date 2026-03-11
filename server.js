@@ -1,12 +1,17 @@
 const http = require("http");
 const https = require("https");
 const fs = require("fs");
-const fetch = require("node-fetch");
 
 // ════════════════════════════════════════════════════════════════════════════
 //  INVITE SYSTEM HELPERS — paste this near the top of server.js,
 //  right after the `const fs = require('fs');` / `const http = require('http');` lines
 // ════════════════════════════════════════════════════════════════════════════
+
+// ── Upstash Redis REST client (no npm package needed) ─────────────────────
+// Uses the plain HTTP REST API — works in any Node environment.
+
+const UPSTASH_URL   = process.env.UPSTASH_REDIS_REST_URL;
+const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
 
 async function kvGet(key) {
   if (!UPSTASH_URL) return null;
@@ -75,44 +80,7 @@ async function isValidToken(token) {
 // ════════════════════════════════════════════════════════════════════════════
 
 
-/* ============================================================
-   UPSTASH REDIS — replaces all JSON file storage
-   Uses the simple HTTP REST API, no SDK needed.
-   ============================================================ */
-const UPSTASH_URL   = process.env.UPSTASH_REDIS_REST_URL;
-const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
-
-async function redisGet(key) {
-  if (!UPSTASH_URL) return null;
-  try {
-    // POST ["GET", key] to root URL — correct Upstash REST format
-    const res = await fetch(UPSTASH_URL, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${UPSTASH_TOKEN}`, "Content-Type": "application/json" },
-      body: JSON.stringify(["GET", key]),
-    });
-    const data = await res.json();
-    if (data.result === null || data.result === undefined) return null;
-    return JSON.parse(data.result);
-  } catch(e) { console.warn("[Redis] GET error:", e.message); return null; }
-}
-
-async function redisSet(key, value) {
-  if (!UPSTASH_URL) return;
-  try {
-    const body = JSON.stringify(["SET", key, JSON.stringify(value)]);
-    console.log("[Redis] SET", key, "body length:", body.length);
-    const res = await fetch(UPSTASH_URL, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${UPSTASH_TOKEN}`, "Content-Type": "application/json" },
-      body,
-    });
-    const data = await res.json();
-    console.log("[Redis] SET response:", JSON.stringify(data));
-  } catch(e) { console.warn("[Redis] SET error:", e.message); }
-}
-
-const PORT = process.env.PORT || 3000;
+const PORT = 3000;
 const agent = new https.Agent({ rejectUnauthorized: false });
 
 const BASE_HEADERS = {
@@ -126,8 +94,7 @@ const BASE_HEADERS = {
 /* ============================================================
    COOKIE PERSISTENCE
    ============================================================ */
-const DATA_DIR = process.env.DATA_DIR || ".";
-const COOKIE_FILE = DATA_DIR + "/auth-cookies.json";
+const COOKIE_FILE = "./auth-cookies.json";
 // Auth is stored per household code. The global `auth` object holds the currently-active household's tokens.
 // When a client connects with a code, their household's auth is loaded into `auth`.
 let householdAuth = {}; // { code: { coles: {...}, woolworths: {...} } }
@@ -542,47 +509,58 @@ function startColesTokenRefresh() {
 /* ============================================================
    SEARCH — COLES
    ============================================================ */
+
+function parseColesProductV2(p, forceSpecial) {
+  const comparable = p.pricing && p.pricing.comparable;
+  let unitPrice = null;
+  if (comparable) {
+    if (typeof comparable === 'object' && comparable !== null) {
+      const val = comparable.value ?? comparable.price ?? comparable.amount;
+      const u   = comparable.unit  ?? comparable.per   ?? comparable.measure;
+      if (val != null && u != null) unitPrice = '$' + parseFloat(val).toFixed(2) + ' / ' + u;
+      else unitPrice = JSON.stringify(comparable);
+    } else {
+      unitPrice = String(comparable).trim();
+    }
+  }
+  const imgUri = p.imageUris && p.imageUris[0] && p.imageUris[0].uri;
+  let imgUrl = null;
+  if (imgUri) {
+    imgUrl = imgUri.startsWith('http') ? imgUri : 'https://assets.coles.com.au' + imgUri;
+  }
+  const price  = (p.pricing && p.pricing.now) || 0;
+  const rawWas = (p.pricing && p.pricing.was)  || null;
+  return {
+    name: p.name || '', brand: p.brand || null,
+    price,
+    wasPrice: (rawWas && rawWas > price) ? rawWas : null,
+    isOnSpecial: forceSpecial || !!(p.pricing && p.pricing.promotionType),
+    unitPrice: unitPrice || null,
+    unit: p.size || null, imgUrl, id: p.id,
+    unavailable: false,
+  };
+}
+
 async function searchColes(query, page) {
   if (!page) page = 1;
-  await refreshColes();
-  const { buildId, cookies } = session.coles;
-  if (!buildId) throw new Error("Could not get Coles buildId");
-  const url = `https://www.coles.com.au/_next/data/${buildId}/en/search/products.json?q=${encodeURIComponent(query)}&page=${page}`;
+  // Use stable /api/2.0/page/ endpoint — no buildId needed, never goes stale
+  const url = 'https://www.coles.com.au/api/2.0/page/search/products?q=' +
+    encodeURIComponent(query) + '&page=' + page + '&pageSize=48&storeId=0601';
+  const cookies = session.coles.cookies || '';
   const res = await fetch(url, {
-    headers: { ...BASE_HEADERS, "Accept": "application/json", "Referer": `https://www.coles.com.au/search/products?q=${encodeURIComponent(query)}`, "sec-fetch-site": "same-origin", "sec-fetch-mode": "cors", "sec-fetch-dest": "empty", ...(cookies ? { "Cookie": cookies } : {}) },
+    headers: { ...BASE_HEADERS, "Accept": "application/json, text/plain, */*",
+      "Referer": "https://www.coles.com.au/search/products?q=" + encodeURIComponent(query),
+      "Origin": "https://www.coles.com.au",
+      "sec-fetch-site": "same-origin", "sec-fetch-mode": "cors",
+      ...(cookies ? { "Cookie": cookies } : {}) },
     agent,
   });
-  if (!res.ok) {
-    if (res.status === 404) { session.coles.buildId = ""; session.coles.fetched = 0; }
-    throw new Error("Coles HTTP " + res.status);
-  }
+  if (!res.ok) throw new Error("Coles search HTTP " + res.status);
   const data = await res.json();
-  const assetsUrl = data?.pageProps?.assetsUrl || "";
-  const results = data?.pageProps?.searchResults?.results || [];
-  return results.filter(p => p._type === "PRODUCT" && p.pricing && p.pricing.now > 0).map(p => {
-    const comparable = p.pricing?.comparable;
-    // Parse comparable into a normalised unitPrice string e.g. "$1.20 / 100g"
-    // Coles comparable can be an object {value, unit} or a plain string
-    let unitPrice = null;
-    if (comparable) {
-      if (typeof comparable === 'object' && comparable !== null) {
-        // Object form: { value: 1.2, unit: "100g" } or similar
-        const val = comparable.value ?? comparable.price ?? comparable.amount;
-        const u   = comparable.unit ?? comparable.per ?? comparable.measure;
-        if (val != null && u != null) unitPrice = '$' + parseFloat(val).toFixed(2) + ' / ' + u;
-        else unitPrice = JSON.stringify(comparable);
-      } else {
-        unitPrice = String(comparable).trim();
-      }
-    }
-    return {
-      name: p.name, brand: p.brand || null, price: p.pricing?.now,
-      wasPrice: p.pricing?.was || null, isOnSpecial: !!p.pricing?.promotionType,
-      unitPrice: unitPrice || null,
-      unit: p.size || null, imgUrl: p.imageUris?.[0]?.uri ? assetsUrl + p.imageUris[0].uri : null, id: p.id,
-      unavailable: false,
-    };
-  });
+  const results = (data && data.searchResults && data.searchResults.results) || [];
+  return results
+    .filter(p => p._type === "PRODUCT" && p.pricing && p.pricing.now > 0)
+    .map(p => parseColesProductV2(p, false));
 }
 
 /* ============================================================
@@ -620,42 +598,32 @@ async function searchWoolworths(query, page) {
    ============================================================ */
 async function getColesSpecials(page) {
   if (!page) page = 1;
-  await refreshColes();
-  const { buildId, cookies } = session.coles;
-  if (!buildId) throw new Error("Could not get Coles buildId");
-  const url = `https://www.coles.com.au/_next/data/${buildId}/en/on-special.json?page=${page}`;
-  const res = await fetch(url, {
-    headers: { ...BASE_HEADERS, "Accept": "application/json", "Referer": "https://www.coles.com.au/on-special", "sec-fetch-site": "same-origin", "sec-fetch-mode": "cors", "sec-fetch-dest": "empty", ...(cookies ? { "Cookie": cookies } : {}) },
-    agent,
-  });
-  if (!res.ok) {
-    if (res.status === 404) { session.coles.buildId = ""; session.coles.fetched = 0; }
-    throw new Error("Coles specials HTTP " + res.status);
+  // Use stable /api/2.0/page/ endpoint — no buildId needed
+  const cookies = session.coles.cookies || '';
+  const endpoints = [
+    'https://www.coles.com.au/api/2.0/page/half-price?page=' + page + '&pageSize=48&storeId=0601',
+    'https://www.coles.com.au/api/2.0/page/on-special?page='  + page + '&pageSize=48&storeId=0601',
+  ];
+  for (const url of endpoints) {
+    try {
+      const res = await fetch(url, {
+        headers: { ...BASE_HEADERS, "Accept": "application/json, text/plain, */*",
+          "Referer": "https://www.coles.com.au/on-special",
+          "Origin": "https://www.coles.com.au",
+          "sec-fetch-site": "same-origin", "sec-fetch-mode": "cors",
+          ...(cookies ? { "Cookie": cookies } : {}) },
+        agent,
+      });
+      if (!res.ok) { console.warn("[Coles specials]", url, "HTTP", res.status); continue; }
+      const data = await res.json();
+      const results = (data && data.searchResults && data.searchResults.results) || [];
+      const items = results
+        .filter(p => p._type === "PRODUCT" && p.pricing && p.pricing.now > 0)
+        .map(p => parseColesProductV2(p, true));
+      if (items.length > 0) return items;
+    } catch(e) { console.warn("[Coles specials]", url, e.message); }
   }
-  const data = await res.json();
-  const assetsUrl = data?.pageProps?.assetsUrl || "";
-  const results = data?.pageProps?.searchResults?.results || [];
-  return results.filter(p => p._type === "PRODUCT" && p.pricing && p.pricing.now > 0).map(p => {
-    const comparable = p.pricing?.comparable;
-    let unitPrice = null;
-    if (comparable) {
-      if (typeof comparable === 'object' && comparable !== null) {
-        const val = comparable.value ?? comparable.price ?? comparable.amount;
-        const u   = comparable.unit ?? comparable.per ?? comparable.measure;
-        if (val != null && u != null) unitPrice = '$' + parseFloat(val).toFixed(2) + ' / ' + u;
-        else unitPrice = JSON.stringify(comparable);
-      } else {
-        unitPrice = String(comparable).trim();
-      }
-    }
-    return {
-      name: p.name, brand: p.brand || null, price: p.pricing?.now,
-      wasPrice: p.pricing?.was || null, isOnSpecial: true,
-      unitPrice: unitPrice || null,
-      unit: p.size || null, imgUrl: p.imageUris?.[0]?.uri ? assetsUrl + p.imageUris[0].uri : null, id: p.id,
-      unavailable: false,
-    };
-  });
+  throw new Error("Coles specials unavailable from all endpoints");
 }
 
 /* ============================================================
@@ -1198,55 +1166,127 @@ async function addToColesCart(items) {
 }
 
 /* ============================================================
-   SSE
+   SSE + shared list + shared shop
    ============================================================ */
+let householdLists = {};   // { code: { coles:[], woolworths:[] } }
+let householdShops = {};   // { code: { coles:[], woolworths:[] } }
 const sseClients = new Set();
-const sseClientCodes = new Map();
+const sseClientCodes = new Map(); // client res -> householdCode
+
+function getList(code) {
+  if (!code) return { coles: [], woolworths: [] };
+  return householdLists[code] || { coles: [], woolworths: [] };
+}
+function setList(code, data) {
+  if (!code) return;
+  householdLists[code] = data;
+  saveListsToDisk();
+  broadcast('list-update', { code, list: data }, code);
+}
+function getShop(code) {
+  if (!code) return { coles: [], woolworths: [] };
+  return householdShops[code] || { coles: [], woolworths: [] };
+}
+function setShop(code, data) {
+  if (!code) return;
+  householdShops[code] = data;
+  saveShopsToDisk();
+  broadcast('shop-update', { code, shopList: data }, code);
+}
 
 /* ============================================================
-   STORAGE — Upstash Redis (replaces all JSON file I/O)
-   Keys: bb:battles:CODE, bb:list:CODE, bb:shop:CODE, bb:history:CODE
+   HOUSEHOLD BATTLES PERSISTENCE
    ============================================================ */
+const BATTLES_FILE = "./battles.json";
+const LISTS_FILE   = "./lists.json";
+const SHOPS_FILE   = "./shops.json";
+const HISTORY_FILE = "./history.json";
+let allHouseholdBattles = {};
+let householdHistory = {}; // { code: [ { id, date, coles: {total, items}, woolworths: {total, items} } ] }
 
-async function getList(code) {
-  if (!code) return { coles: [], woolworths: [] };
-  return (await redisGet("bb:list:" + code.toUpperCase())) || { coles: [], woolworths: [] };
+function loadBattlesFromDisk() {
+  try {
+    if (fs.existsSync(BATTLES_FILE)) {
+      allHouseholdBattles = JSON.parse(fs.readFileSync(BATTLES_FILE, "utf8"));
+      console.log("[Battles] Loaded", Object.keys(allHouseholdBattles).length, "household(s) from disk.");
+    }
+  } catch(e) { console.warn("[Battles] Could not load battles:", e.message); }
 }
-async function setList(code, data) {
-  if (!code) return;
-  await redisSet("bb:list:" + code.toUpperCase(), data);
-  broadcast("list-update", { code, list: data }, code);
+
+function saveBattlesToDisk() {
+  try { fs.writeFileSync(BATTLES_FILE, JSON.stringify(allHouseholdBattles, null, 2)); }
+  catch(e) { console.warn("[Battles] Could not save battles:", e.message); }
 }
-async function getShop(code) {
-  if (!code) return { coles: [], woolworths: [] };
-  return (await redisGet("bb:shop:" + code.toUpperCase())) || { coles: [], woolworths: [] };
+
+function loadListsFromDisk() {
+  try {
+    if (fs.existsSync(LISTS_FILE)) {
+      householdLists = JSON.parse(fs.readFileSync(LISTS_FILE, "utf8"));
+      console.log("[Lists] Loaded", Object.keys(householdLists).length, "household(s) from disk.");
+    }
+  } catch(e) { console.warn("[Lists] Could not load lists:", e.message); }
 }
-async function setShop(code, data) {
-  if (!code) return;
-  await redisSet("bb:shop:" + code.toUpperCase(), data);
-  broadcast("shop-update", { code, shopList: data }, code);
+
+function saveListsToDisk() {
+  try { fs.writeFileSync(LISTS_FILE, JSON.stringify(householdLists, null, 2)); }
+  catch(e) { console.warn("[Lists] Could not save lists:", e.message); }
 }
-async function getHistory(code) {
+
+function loadShopsFromDisk() {
+  try {
+    if (fs.existsSync(SHOPS_FILE)) {
+      householdShops = JSON.parse(fs.readFileSync(SHOPS_FILE, "utf8"));
+      console.log("[Shops] Loaded", Object.keys(householdShops).length, "household(s) from disk.");
+    }
+  } catch(e) { console.warn("[Shops] Could not load shops:", e.message); }
+}
+
+function saveShopsToDisk() {
+  try { fs.writeFileSync(SHOPS_FILE, JSON.stringify(householdShops, null, 2)); }
+  catch(e) { console.warn("[Shops] Could not save shops:", e.message); }
+}
+
+function loadHistoryFromDisk() {
+  try {
+    if (fs.existsSync(HISTORY_FILE)) {
+      householdHistory = JSON.parse(fs.readFileSync(HISTORY_FILE, "utf8"));
+      console.log("[History] Loaded", Object.keys(householdHistory).length, "household(s) from disk.");
+    }
+  } catch(e) { console.warn("[History] Could not load history:", e.message); }
+}
+
+function saveHistoryToDisk() {
+  try { fs.writeFileSync(HISTORY_FILE, JSON.stringify(householdHistory, null, 2)); }
+  catch(e) { console.warn("[History] Could not save history:", e.message); }
+}
+
+function getHistory(code) {
   if (!code) return [];
-  return (await redisGet("bb:history:" + code.toUpperCase())) || [];
+  return householdHistory[code.toUpperCase()] || [];
 }
-async function addHistory(code, entry) {
+
+function addHistory(code, entry) {
   if (!code) return;
   const key = code.toUpperCase();
-  let history = (await redisGet("bb:history:" + key)) || [];
-  history.unshift(entry);
-  if (history.length > 50) history = history.slice(0, 50);
-  await redisSet("bb:history:" + key, history);
-  broadcast("history-update", { code: key, history }, key);
+  if (!householdHistory[key]) householdHistory[key] = [];
+  householdHistory[key].unshift(entry); // newest first
+  // Keep max 50 entries per household
+  if (householdHistory[key].length > 50) householdHistory[key] = householdHistory[key].slice(0, 50);
+  saveHistoryToDisk();
+  broadcast('history-update', { code: key, history: householdHistory[key] }, key);
 }
-async function getBattles(code) {
+
+function getBattles(code) {
   if (!code) return [];
-  return (await redisGet("bb:battles:" + code.toUpperCase())) || [];
+  return allHouseholdBattles[code.toUpperCase()] || [];
 }
-async function setBattles(code, groups) {
+
+function setBattles(code, groups) {
   if (!code) return;
-  await redisSet("bb:battles:" + code.toUpperCase(), groups);
-  broadcast("battles-update", { code: code.toUpperCase(), groups });
+  allHouseholdBattles[code.toUpperCase()] = groups;
+  saveBattlesToDisk();
+  // broadcast to all clients with this household code
+  broadcast('battles-update', { code: code.toUpperCase(), groups });
 }
 
 function broadcast(event, data, targetCode) {
@@ -1277,7 +1317,7 @@ function parseBody(req) {
 const server = http.createServer(async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-// ════════════════════════════════════════════════════════════════════════════
+  // ════════════════════════════════════════════════════════════════════════════
 //  PASTE THIS BLOCK to REPLACE the existing "/ping" line and CORS header line:
 //
 //    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -1390,14 +1430,6 @@ const server = http.createServer(async (req, res) => {
 // ════════════════════════════════════════════════════════════════════════════
 
 
-  if (path === "/buildid") {
-    // Ensure we have a fresh buildId
-    await refreshColes();
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ buildId: session.coles.buildId, cookies: session.coles.cookies }));
-    return;
-  }
-
   if (path === "/specials") {
     const page = parseInt(parsed.searchParams.get("page") || "1", 10);
     let colesError = null, woolworthsError = null, coles = [], woolworths = [];
@@ -1431,13 +1463,12 @@ const server = http.createServer(async (req, res) => {
     if (!code) { res.writeHead(400, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "No household code" })); return; }
     if (req.method === "GET") {
       res.writeHead(200, { "Content-Type": "application/json" });
-      const battleGroups = await getBattles(code);
-      res.end(JSON.stringify({ groups: battleGroups }));
+      res.end(JSON.stringify({ groups: getBattles(code) }));
       return;
     }
     if (req.method === "POST") {
       const body = await parseBody(req);
-      await setBattles(code, body.groups || []);
+      setBattles(code, body.groups || []);
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true }));
       return;
@@ -1448,13 +1479,12 @@ const server = http.createServer(async (req, res) => {
     const code = parsed.searchParams.get("code") || "";
     if (req.method === "GET") {
       res.writeHead(200, { "Content-Type": "application/json" });
-      const listData = await getList(code);
-      res.end(JSON.stringify(listData));
+      res.end(JSON.stringify(getList(code)));
       return;
     }
     if (req.method === "POST") {
       const body = await parseBody(req);
-      if (code) await setList(code, body);
+      if (code) setList(code, body);
       res.writeHead(200); res.end("ok");
       return;
     }
@@ -1464,13 +1494,12 @@ const server = http.createServer(async (req, res) => {
     const code = parsed.searchParams.get("code") || "";
     if (req.method === "GET") {
       res.writeHead(200, { "Content-Type": "application/json" });
-      const shopData = await getShop(code);
-      res.end(JSON.stringify(shopData));
+      res.end(JSON.stringify(getShop(code)));
       return;
     }
     if (req.method === "POST") {
       const body = await parseBody(req);
-      if (code) await setShop(code, body);
+      if (code) setShop(code, body);
       res.writeHead(200); res.end("ok");
       return;
     }
@@ -1481,26 +1510,12 @@ const server = http.createServer(async (req, res) => {
     if (!code) { res.writeHead(400); res.end("No code"); return; }
     if (req.method === "GET") {
       res.writeHead(200, { "Content-Type": "application/json" });
-      const histData = await getHistory(code);
-      res.end(JSON.stringify({ history: histData }));
+      res.end(JSON.stringify({ history: getHistory(code) }));
       return;
     }
     if (req.method === "POST") {
       const body = await parseBody(req);
-      if (body.entry) await addHistory(code, body.entry);
-      res.writeHead(200); res.end("ok");
-      return;
-    }
-  }
-
-  if (path === "/history/replace") {
-    const code = parsed.searchParams.get("code") || "";
-    if (!code) { res.writeHead(400); res.end("No code"); return; }
-    if (req.method === "POST") {
-      const body = await parseBody(req);
-      if (Array.isArray(body.history)) {
-        await redisSet("bb:history:" + code.toUpperCase(), body.history);
-      }
+      if (body.entry) addHistory(code, body.entry);
       res.writeHead(200); res.end("ok");
       return;
     }
@@ -1826,24 +1841,21 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (path === "/") {
-    try {
-      const html = fs.readFileSync("index.html");
-      res.writeHead(200, { "Content-Type": "text/html" });
-      res.end(html);
-    } catch(e) {
-      res.writeHead(200, { "Content-Type": "text/plain" });
-      res.end("BasketBattle server is running.");
-    }
+    try { res.writeHead(200, { "Content-Type": "text/html" }); res.end(fs.readFileSync("index.html")); }
+    catch(e) { res.writeHead(404); res.end("index.html not found"); }
     return;
   }
 
   res.writeHead(404); res.end();
 });
 
-server.listen(PORT, "0.0.0.0", async () => {
+server.listen(PORT, async () => {
   console.log("Basket Battle running on port", PORT);
   loadCookiesFromDisk();
-  console.log("[Redis] Using Upstash at", UPSTASH_URL ? UPSTASH_URL.split(".")[0] + "..." : "NOT CONFIGURED");
+  loadBattlesFromDisk();
+  loadListsFromDisk();
+  loadShopsFromDisk();
+  loadHistoryFromDisk();
   setTimeout(async () => {
     for (const store of ['coles', 'woolworths']) {
       if (auth[store].loggedIn && auth[store].cookies) {
