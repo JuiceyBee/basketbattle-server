@@ -8,12 +8,6 @@ const fetch = require("node-fetch");
 //  right after the `const fs = require('fs');` / `const http = require('http');` lines
 // ════════════════════════════════════════════════════════════════════════════
 
-// ── Upstash Redis REST client (no npm package needed) ─────────────────────
-// Uses the plain HTTP REST API — works in any Node environment.
-
-const UPSTASH_URL   = process.env.UPSTASH_REDIS_REST_URL;
-const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
-
 async function kvGet(key) {
   if (!UPSTASH_URL) return null;
   try {
