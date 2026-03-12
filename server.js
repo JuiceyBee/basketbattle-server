@@ -2,84 +2,6 @@ const http = require("http");
 const https = require("https");
 const fs = require("fs");
 
-// ════════════════════════════════════════════════════════════════════════════
-//  INVITE SYSTEM HELPERS — paste this near the top of server.js,
-//  right after the `const fs = require('fs');` / `const http = require('http');` lines
-// ════════════════════════════════════════════════════════════════════════════
-
-// ── Upstash Redis REST client (no npm package needed) ─────────────────────
-// Uses the plain HTTP REST API — works in any Node environment.
-
-const UPSTASH_URL   = process.env.UPSTASH_REDIS_REST_URL;
-const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
-
-async function kvGet(key) {
-  if (!UPSTASH_URL) return null;
-  try {
-    const r = await fetch(
-      `${UPSTASH_URL}/get/${encodeURIComponent(key)}`,
-      { headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` } }
-    );
-    const j = await r.json();
-    return j.result ? JSON.parse(j.result) : null;
-  } catch { return null; }
-}
-
-async function kvSet(key, value) {
-  if (!UPSTASH_URL) return;
-  try {
-    await fetch(`${UPSTASH_URL}/set/${encodeURIComponent(key)}`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${UPSTASH_TOKEN}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(JSON.stringify(value)),
-    });
-  } catch(e) { console.warn('[KV] set error', e.message); }
-}
-
-async function kvDel(key) {
-  if (!UPSTASH_URL) return;
-  try {
-    await fetch(`${UPSTASH_URL}/del/${encodeURIComponent(key)}`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` },
-    });
-  } catch {}
-}
-
-async function kvKeys(pattern) {
-  if (!UPSTASH_URL) return [];
-  try {
-    const r = await fetch(
-      `${UPSTASH_URL}/keys/${encodeURIComponent(pattern)}`,
-      { headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` } }
-    );
-    const j = await r.json();
-    return j.result || [];
-  } catch { return []; }
-}
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-function randomCode(len = 8) {
-  // No 0/O/1/I to avoid confusion when reading aloud
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  let s = '';
-  for (let i = 0; i < len; i++) s += chars[Math.floor(Math.random() * chars.length)];
-  return s;
-}
-
-async function isValidToken(token) {
-  if (!token) return false;
-  const data = await kvGet(`bb:token:${token}`);
-  return !!data;
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-
-
 const PORT = 3000;
 const agent = new https.Agent({ rejectUnauthorized: false });
 
@@ -509,58 +431,47 @@ function startColesTokenRefresh() {
 /* ============================================================
    SEARCH — COLES
    ============================================================ */
-
-function parseColesProductV2(p, forceSpecial) {
-  const comparable = p.pricing && p.pricing.comparable;
-  let unitPrice = null;
-  if (comparable) {
-    if (typeof comparable === 'object' && comparable !== null) {
-      const val = comparable.value ?? comparable.price ?? comparable.amount;
-      const u   = comparable.unit  ?? comparable.per   ?? comparable.measure;
-      if (val != null && u != null) unitPrice = '$' + parseFloat(val).toFixed(2) + ' / ' + u;
-      else unitPrice = JSON.stringify(comparable);
-    } else {
-      unitPrice = String(comparable).trim();
-    }
-  }
-  const imgUri = p.imageUris && p.imageUris[0] && p.imageUris[0].uri;
-  let imgUrl = null;
-  if (imgUri) {
-    imgUrl = imgUri.startsWith('http') ? imgUri : 'https://assets.coles.com.au' + imgUri;
-  }
-  const price  = (p.pricing && p.pricing.now) || 0;
-  const rawWas = (p.pricing && p.pricing.was)  || null;
-  return {
-    name: p.name || '', brand: p.brand || null,
-    price,
-    wasPrice: (rawWas && rawWas > price) ? rawWas : null,
-    isOnSpecial: forceSpecial || !!(p.pricing && p.pricing.promotionType),
-    unitPrice: unitPrice || null,
-    unit: p.size || null, imgUrl, id: p.id,
-    unavailable: false,
-  };
-}
-
 async function searchColes(query, page) {
   if (!page) page = 1;
-  // Use stable /api/2.0/page/ endpoint — no buildId needed, never goes stale
-  const url = 'https://www.coles.com.au/api/2.0/page/search/products?q=' +
-    encodeURIComponent(query) + '&page=' + page + '&pageSize=48&storeId=0601';
-  const cookies = session.coles.cookies || '';
+  await refreshColes();
+  const { buildId, cookies } = session.coles;
+  if (!buildId) throw new Error("Could not get Coles buildId");
+  const url = `https://www.coles.com.au/_next/data/${buildId}/en/search/products.json?q=${encodeURIComponent(query)}&page=${page}`;
   const res = await fetch(url, {
-    headers: { ...BASE_HEADERS, "Accept": "application/json, text/plain, */*",
-      "Referer": "https://www.coles.com.au/search/products?q=" + encodeURIComponent(query),
-      "Origin": "https://www.coles.com.au",
-      "sec-fetch-site": "same-origin", "sec-fetch-mode": "cors",
-      ...(cookies ? { "Cookie": cookies } : {}) },
+    headers: { ...BASE_HEADERS, "Accept": "application/json", "Referer": `https://www.coles.com.au/search/products?q=${encodeURIComponent(query)}`, "sec-fetch-site": "same-origin", "sec-fetch-mode": "cors", "sec-fetch-dest": "empty", ...(cookies ? { "Cookie": cookies } : {}) },
     agent,
   });
-  if (!res.ok) throw new Error("Coles search HTTP " + res.status);
+  if (!res.ok) {
+    if (res.status === 404) { session.coles.buildId = ""; session.coles.fetched = 0; }
+    throw new Error("Coles HTTP " + res.status);
+  }
   const data = await res.json();
-  const results = (data && data.searchResults && data.searchResults.results) || [];
-  return results
-    .filter(p => p._type === "PRODUCT" && p.pricing && p.pricing.now > 0)
-    .map(p => parseColesProductV2(p, false));
+  const assetsUrl = data?.pageProps?.assetsUrl || "";
+  const results = data?.pageProps?.searchResults?.results || [];
+  return results.filter(p => p._type === "PRODUCT" && p.pricing && p.pricing.now > 0).map(p => {
+    const comparable = p.pricing?.comparable;
+    // Parse comparable into a normalised unitPrice string e.g. "$1.20 / 100g"
+    // Coles comparable can be an object {value, unit} or a plain string
+    let unitPrice = null;
+    if (comparable) {
+      if (typeof comparable === 'object' && comparable !== null) {
+        // Object form: { value: 1.2, unit: "100g" } or similar
+        const val = comparable.value ?? comparable.price ?? comparable.amount;
+        const u   = comparable.unit ?? comparable.per ?? comparable.measure;
+        if (val != null && u != null) unitPrice = '$' + parseFloat(val).toFixed(2) + ' / ' + u;
+        else unitPrice = JSON.stringify(comparable);
+      } else {
+        unitPrice = String(comparable).trim();
+      }
+    }
+    return {
+      name: p.name, brand: p.brand || null, price: p.pricing?.now,
+      wasPrice: p.pricing?.was || null, isOnSpecial: !!p.pricing?.promotionType,
+      unitPrice: unitPrice || null,
+      unit: p.size || null, imgUrl: p.imageUris?.[0]?.uri ? assetsUrl + p.imageUris[0].uri : null, id: p.id,
+      unavailable: false,
+    };
+  });
 }
 
 /* ============================================================
@@ -598,32 +509,42 @@ async function searchWoolworths(query, page) {
    ============================================================ */
 async function getColesSpecials(page) {
   if (!page) page = 1;
-  // Use stable /api/2.0/page/ endpoint — no buildId needed
-  const cookies = session.coles.cookies || '';
-  const endpoints = [
-    'https://www.coles.com.au/api/2.0/page/half-price?page=' + page + '&pageSize=48&storeId=0601',
-    'https://www.coles.com.au/api/2.0/page/on-special?page='  + page + '&pageSize=48&storeId=0601',
-  ];
-  for (const url of endpoints) {
-    try {
-      const res = await fetch(url, {
-        headers: { ...BASE_HEADERS, "Accept": "application/json, text/plain, */*",
-          "Referer": "https://www.coles.com.au/on-special",
-          "Origin": "https://www.coles.com.au",
-          "sec-fetch-site": "same-origin", "sec-fetch-mode": "cors",
-          ...(cookies ? { "Cookie": cookies } : {}) },
-        agent,
-      });
-      if (!res.ok) { console.warn("[Coles specials]", url, "HTTP", res.status); continue; }
-      const data = await res.json();
-      const results = (data && data.searchResults && data.searchResults.results) || [];
-      const items = results
-        .filter(p => p._type === "PRODUCT" && p.pricing && p.pricing.now > 0)
-        .map(p => parseColesProductV2(p, true));
-      if (items.length > 0) return items;
-    } catch(e) { console.warn("[Coles specials]", url, e.message); }
+  await refreshColes();
+  const { buildId, cookies } = session.coles;
+  if (!buildId) throw new Error("Could not get Coles buildId");
+  const url = `https://www.coles.com.au/_next/data/${buildId}/en/on-special.json?page=${page}`;
+  const res = await fetch(url, {
+    headers: { ...BASE_HEADERS, "Accept": "application/json", "Referer": "https://www.coles.com.au/on-special", "sec-fetch-site": "same-origin", "sec-fetch-mode": "cors", "sec-fetch-dest": "empty", ...(cookies ? { "Cookie": cookies } : {}) },
+    agent,
+  });
+  if (!res.ok) {
+    if (res.status === 404) { session.coles.buildId = ""; session.coles.fetched = 0; }
+    throw new Error("Coles specials HTTP " + res.status);
   }
-  throw new Error("Coles specials unavailable from all endpoints");
+  const data = await res.json();
+  const assetsUrl = data?.pageProps?.assetsUrl || "";
+  const results = data?.pageProps?.searchResults?.results || [];
+  return results.filter(p => p._type === "PRODUCT" && p.pricing && p.pricing.now > 0).map(p => {
+    const comparable = p.pricing?.comparable;
+    let unitPrice = null;
+    if (comparable) {
+      if (typeof comparable === 'object' && comparable !== null) {
+        const val = comparable.value ?? comparable.price ?? comparable.amount;
+        const u   = comparable.unit ?? comparable.per ?? comparable.measure;
+        if (val != null && u != null) unitPrice = '$' + parseFloat(val).toFixed(2) + ' / ' + u;
+        else unitPrice = JSON.stringify(comparable);
+      } else {
+        unitPrice = String(comparable).trim();
+      }
+    }
+    return {
+      name: p.name, brand: p.brand || null, price: p.pricing?.now,
+      wasPrice: p.pricing?.was || null, isOnSpecial: true,
+      unitPrice: unitPrice || null,
+      unit: p.size || null, imgUrl: p.imageUris?.[0]?.uri ? assetsUrl + p.imageUris[0].uri : null, id: p.id,
+      unavailable: false,
+    };
+  });
 }
 
 /* ============================================================
@@ -1317,120 +1238,13 @@ function parseBody(req) {
 const server = http.createServer(async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
- 
-// ════════════════════════════════════════════════════════════════════════════
-//  PASTE THIS BLOCK to REPLACE the existing "/ping" line and CORS header line:
-//
-//    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-//    ...
-//    if (path === "/ping") { res.writeHead(200); res.end("ok"); return; }
-//
-//  Replace those two lines with everything below:
-// ════════════════════════════════════════════════════════════════════════════
-
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, x-bb-access");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
 
   const parsed = new URL(req.url, "http://localhost");
   const path = parsed.pathname;
 
-  // ── Always public ──────────────────────────────────────────────────────────
   if (path === "/ping") { res.writeHead(200); res.end("ok"); return; }
-
-  // ── Redeem a single-use invite code → get a permanent token ───────────────
-  if (path === "/redeem-invite" && req.method === "POST") {
-    const body = await parseBody(req);
-    const code = (body.code || '').trim().toUpperCase();
-    if (!code) { res.writeHead(400); res.end(JSON.stringify({ error: 'No code' })); return; }
-
-    const inviteData = await kvGet(`bb:invite:${code}`);
-    if (!inviteData) {
-      res.writeHead(401, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: false, error: 'Invalid invite code' }));
-      return;
-    }
-    if (inviteData.used) {
-      res.writeHead(401, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: false, error: 'Invite code already used' }));
-      return;
-    }
-
-    // Burn the invite, issue a token
-    const token = randomCode(24);
-    const now = new Date().toISOString();
-    await kvSet(`bb:invite:${code}`, { ...inviteData, used: true, usedAt: now, token });
-    await kvSet(`bb:token:${token}`, { createdAt: now, label: inviteData.label || code, inviteCode: code });
-
-    console.log(`[Access] Invite ${code} redeemed → token issued`);
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ ok: true, token }));
-    return;
-  }
-
-  // ── Admin: create invite code(s) ──────────────────────────────────────────
-  if (path === "/admin/invite" && req.method === "POST") {
-    const body = await parseBody(req);
-    if (body.adminKey !== process.env.BB_ADMIN_KEY) {
-      res.writeHead(403); res.end(JSON.stringify({ error: 'Forbidden' })); return;
-    }
-    const count = Math.min(20, parseInt(body.count || '1', 10));
-    const label = body.label || '';
-    const codes = [];
-    for (let i = 0; i < count; i++) {
-      const code = randomCode(8);
-      await kvSet(`bb:invite:${code}`, { createdAt: new Date().toISOString(), label, used: false });
-      codes.push(code);
-    }
-    console.log(`[Access] Created ${codes.length} invite(s): ${codes.join(', ')}`);
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ ok: true, codes }));
-    return;
-  }
-
-  // ── Admin: list all invites + tokens ──────────────────────────────────────
-  if (path === "/admin/invites" && req.method === "POST") {
-    const body = await parseBody(req);
-    if (body.adminKey !== process.env.BB_ADMIN_KEY) {
-      res.writeHead(403); res.end(JSON.stringify({ error: 'Forbidden' })); return;
-    }
-    const inviteKeys = await kvKeys('bb:invite:*');
-    const tokenKeys  = await kvKeys('bb:token:*');
-    const invites = await Promise.all(inviteKeys.map(async k => {
-      const d = await kvGet(k); return { code: k.replace('bb:invite:', ''), ...d };
-    }));
-    const tokens = await Promise.all(tokenKeys.map(async k => {
-      const d = await kvGet(k); return { token: k.replace('bb:token:', ''), ...d };
-    }));
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ invites, tokens }));
-    return;
-  }
-
-  // ── Admin: revoke a token ─────────────────────────────────────────────────
-  if (path === "/admin/revoke" && req.method === "POST") {
-    const body = await parseBody(req);
-    if (body.adminKey !== process.env.BB_ADMIN_KEY) {
-      res.writeHead(403); res.end(JSON.stringify({ error: 'Forbidden' })); return;
-    }
-    await kvDel(`bb:token:${body.token}`);
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ ok: true }));
-    return;
-  }
-
-  // ── All other routes require a valid token ────────────────────────────────
-  const token = req.headers['x-bb-access'] || parsed.searchParams.get('access') || '';
-  if (!(await isValidToken(token))) {
-    res.writeHead(401, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Unauthorised' }));
-    return;
-  }
-
-// ════════════════════════════════════════════════════════════════════════════
-// Continue with existing routes below this point (specials, search, etc.)
-// ════════════════════════════════════════════════════════════════════════════
-
-
 
   if (path === "/specials") {
     const page = parseInt(parsed.searchParams.get("page") || "1", 10);
