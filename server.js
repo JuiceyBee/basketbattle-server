@@ -1,6 +1,7 @@
 const http = require("http");
 const https = require("https");
 const fs = require("fs");
+
 // ── Upstash Redis REST client ─────────────────────────────────────────────
 const UPSTASH_URL   = process.env.UPSTASH_REDIS_REST_URL;
 const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
@@ -52,8 +53,6 @@ async function isValidToken(token) {
   const data = await kvGet(`bb:token:${token}`);
   return !!data;
 }
-
-
 
 const PORT = 3000;
 const agent = new https.Agent({ rejectUnauthorized: false });
@@ -929,7 +928,7 @@ async function addToWoolworthsCart(items) {
   for (const item of items) {
     console.log("\n[Woolworths Cart] ── Item:", item.name);
     console.log("[Woolworths Cart]    stockcode:", item.stockcode, "| type:", typeof item.stockcode);
-    console.log("[Woolworths Cart]    quantity:", item.quantity || 1);
+    console.log("[Woolworths Cart]    quantity:", item.qty || item.quantity || 1);
 
     if (!item.stockcode) {
       const msg = item.name + " — no stockcode (was this item from Woolworths search?)";
@@ -947,7 +946,7 @@ async function addToWoolworthsCart(items) {
         url: "https://www.woolworths.com.au/apis/ui/Trolley/AddItem",
         body: JSON.stringify({
           stockcode: Number(item.stockcode),
-          quantity: item.quantity || 1,
+          quantity: item.qty || item.quantity || 1,
           addoncontents: [],
         }),
       },
@@ -956,7 +955,7 @@ async function addToWoolworthsCart(items) {
         url: "https://www.woolworths.com.au/apis/ui/Trolley/UpdateItem",
         body: JSON.stringify({
           stockcode: Number(item.stockcode),
-          quantity: item.quantity || 1,
+          quantity: item.qty || item.quantity || 1,
           addoncontents: [],
         }),
       },
@@ -964,7 +963,7 @@ async function addToWoolworthsCart(items) {
         label: "Basket/update (legacy flat)",
         url: "https://www.woolworths.com.au/apis/ui/Basket/update",
         body: JSON.stringify({
-          Quantity: item.quantity || 1,
+          Quantity: item.qty || item.quantity || 1,
           StockCode: Number(item.stockcode),
           IsInCart: false,
           IsBundle: false,
@@ -1088,11 +1087,11 @@ async function addToColesCart(items) {
       try {
         let body;
         if (endpoint.includes('2.0/trolley')) {
-          body = JSON.stringify({ productId: Number(item.id), quantity: item.quantity || 1, storeId });
+          body = JSON.stringify({ productId: Number(item.id), quantity: item.qty || item.quantity || 1, storeId });
         } else {
           body = JSON.stringify({
             ageGateVerified: false, swapBehaviour: false,
-            items: [{ productId: Number(item.id), quantity: item.quantity || 1 }],
+            items: [{ productId: Number(item.id), quantity: item.qty || item.quantity || 1 }],
           });
         }
 
@@ -1291,7 +1290,7 @@ function parseBody(req) {
 const server = http.createServer(async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, x-bb-access");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
 
   const parsed = new URL(req.url, "http://localhost");
