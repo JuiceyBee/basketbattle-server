@@ -1,6 +1,59 @@
 const http = require("http");
 const https = require("https");
 const fs = require("fs");
+// ── Upstash Redis REST client ─────────────────────────────────────────────
+const UPSTASH_URL   = process.env.UPSTASH_REDIS_REST_URL;
+const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
+
+async function kvGet(key) {
+  if (!UPSTASH_URL) return null;
+  try {
+    const r = await fetch(`${UPSTASH_URL}/get/${encodeURIComponent(key)}`,
+      { headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` } });
+    const j = await r.json();
+    return j.result ? JSON.parse(j.result) : null;
+  } catch { return null; }
+}
+async function kvSet(key, value) {
+  if (!UPSTASH_URL) return;
+  try {
+    await fetch(`${UPSTASH_URL}/set/${encodeURIComponent(key)}`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${UPSTASH_TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(JSON.stringify(value)),
+    });
+  } catch(e) { console.warn('[KV] set error', e.message); }
+}
+async function kvDel(key) {
+  if (!UPSTASH_URL) return;
+  try {
+    await fetch(`${UPSTASH_URL}/del/${encodeURIComponent(key)}`, {
+      method: 'POST', headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` },
+    });
+  } catch {}
+}
+async function kvKeys(pattern) {
+  if (!UPSTASH_URL) return [];
+  try {
+    const r = await fetch(`${UPSTASH_URL}/keys/${encodeURIComponent(pattern)}`,
+      { headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` } });
+    const j = await r.json();
+    return j.result || [];
+  } catch { return []; }
+}
+function randomCode(len = 8) {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let s = '';
+  for (let i = 0; i < len; i++) s += chars[Math.floor(Math.random() * chars.length)];
+  return s;
+}
+async function isValidToken(token) {
+  if (!token) return false;
+  const data = await kvGet(`bb:token:${token}`);
+  return !!data;
+}
+
+
 
 const PORT = 3000;
 const agent = new https.Agent({ rejectUnauthorized: false });
@@ -1238,13 +1291,62 @@ function parseBody(req) {
 const server = http.createServer(async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, x-bb-access");
   if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
 
   const parsed = new URL(req.url, "http://localhost");
   const path = parsed.pathname;
 
   if (path === "/ping") { res.writeHead(200); res.end("ok"); return; }
+
+  // ── Public: redeem invite → permanent token ──────────────────────────────
+  if (path === "/redeem-invite" && req.method === "POST") {
+    const body = await parseBody(req);
+    const code = (body.code || '').trim().toUpperCase();
+    if (!code) { res.writeHead(400); res.end(JSON.stringify({ error: 'No code' })); return; }
+    const inviteData = await kvGet(`bb:invite:${code}`);
+    if (!inviteData) { res.writeHead(401, {'Content-Type':'application/json'}); res.end(JSON.stringify({ ok: false, error: 'Invalid invite code' })); return; }
+    if (inviteData.used) { res.writeHead(401, {'Content-Type':'application/json'}); res.end(JSON.stringify({ ok: false, error: 'Invite code already used' })); return; }
+    const token = randomCode(24);
+    const now = new Date().toISOString();
+    await kvSet(`bb:invite:${code}`, { ...inviteData, used: true, usedAt: now, token });
+    await kvSet(`bb:token:${token}`, { createdAt: now, label: inviteData.label || code, inviteCode: code });
+    console.log(`[Access] Invite ${code} redeemed → token issued`);
+    res.writeHead(200, {'Content-Type':'application/json'}); res.end(JSON.stringify({ ok: true, token })); return;
+  }
+
+  // ── Admin: create invite codes ────────────────────────────────────────────
+  if (path === "/admin/invite" && req.method === "POST") {
+    const body = await parseBody(req);
+    if (body.adminKey !== process.env.BB_ADMIN_KEY) { res.writeHead(403); res.end(JSON.stringify({ error: 'Forbidden' })); return; }
+    const count = Math.min(20, parseInt(body.count || '1', 10));
+    const codes = [];
+    for (let i = 0; i < count; i++) {
+      const code = randomCode(8);
+      await kvSet(`bb:invite:${code}`, { createdAt: new Date().toISOString(), label: body.label || '', used: false });
+      codes.push(code);
+    }
+    res.writeHead(200, {'Content-Type':'application/json'}); res.end(JSON.stringify({ ok: true, codes })); return;
+  }
+
+  // ── Admin: list all invites + tokens ──────────────────────────────────────
+  if (path === "/admin/invites" && req.method === "POST") {
+    const body = await parseBody(req);
+    if (body.adminKey !== process.env.BB_ADMIN_KEY) { res.writeHead(403); res.end(JSON.stringify({ error: 'Forbidden' })); return; }
+    const inviteKeys = await kvKeys('bb:invite:*');
+    const tokenKeys  = await kvKeys('bb:token:*');
+    const invites = await Promise.all(inviteKeys.map(async k => { const d = await kvGet(k); return { code: k.replace('bb:invite:',''), ...d }; }));
+    const tokens  = await Promise.all(tokenKeys.map(async k => { const d = await kvGet(k); return { token: k.replace('bb:token:',''), ...d }; }));
+    res.writeHead(200, {'Content-Type':'application/json'}); res.end(JSON.stringify({ invites, tokens })); return;
+  }
+
+  // ── Admin: revoke a token ─────────────────────────────────────────────────
+  if (path === "/admin/revoke" && req.method === "POST") {
+    const body = await parseBody(req);
+    if (body.adminKey !== process.env.BB_ADMIN_KEY) { res.writeHead(403); res.end(JSON.stringify({ error: 'Forbidden' })); return; }
+    await kvDel(`bb:token:${body.token}`);
+    res.writeHead(200, {'Content-Type':'application/json'}); res.end(JSON.stringify({ ok: true })); return;
+  }
 
   if (path === "/specials") {
     const page = parseInt(parsed.searchParams.get("page") || "1", 10);
@@ -1272,6 +1374,13 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ coles, woolworths, colesError, woolworthsError }));
     return;
+  }
+
+  // ── All other routes require a valid access token ─────────────────────────
+  const bbToken = req.headers['x-bb-access'] || parsed.searchParams.get('access') || '';
+  if (!(await isValidToken(bbToken))) {
+    res.writeHead(401, {'Content-Type':'application/json'});
+    res.end(JSON.stringify({ error: 'Unauthorised' })); return;
   }
 
   if (path === "/battles") {
