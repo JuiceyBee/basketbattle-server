@@ -180,7 +180,9 @@ async function refreshColes() {
         headers: { ...BASE_HEADERS, "Accept": "text/html,*/*", "sec-fetch-site": "none", "sec-fetch-mode": "navigate", "sec-fetch-dest": "document" },
         agent, redirect: "follow",
       });
+      console.log("[Coles] refreshColes fetched", pageUrl, "→ HTTP", res.status);
       const html = await res.text();
+      console.log("[Coles] HTML length:", html.length, "| first 200:", html.slice(0, 200).replace(/\n/g, ' '));
       const sc = res.headers.get("set-cookie") || "";
       let buildId = "";
       const m1 = html.match(/"buildId"\s*:\s*"([^"]+)"/);
@@ -189,14 +191,17 @@ async function refreshColes() {
         const m2 = html.match(/\/_next\/static\/([a-zA-Z0-9._-]+)\/_buildManifest/);
         if (m2) buildId = m2[1];
       }
+      console.log("[Coles] buildId from", pageUrl, ":", buildId || "NOT FOUND");
       if (buildId) {
         session.coles.buildId = buildId;
         if (sc) session.coles.cookies = sc.split(",").map(c => c.split(";")[0].trim()).join("; ");
         break;
       }
-    } catch(e) {}
+    } catch(e) {
+      console.warn("[Coles] refreshColes error for", pageUrl, ":", e.message);
+    }
   }
-  session.coles.fetched = session.coles.buildId ? Date.now() : 0; // only cache if we got one
+  session.coles.fetched = session.coles.buildId ? Date.now() : 0;
   console.log("[Coles] buildId:", session.coles.buildId || "FAILED — will retry on next request");
   if (!colesCartConfig.subscriptionKey) {
     await refreshColesSubscriptionKey();
@@ -1284,6 +1289,9 @@ function parseBody(req) {
    HTTP SERVER
    ============================================================ */
 const server = http.createServer(async (req, res) => {
+  // Global error guard — prevent any unhandled error from crashing the server
+  res.on('error', (e) => console.warn('[HTTP] Response error:', e.message));
+  try {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -1357,7 +1365,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === "POST") {
       const body = await parseBody(req);
-      if (code) setList(code, body);
+      if (code) await setList(code, body);
       res.writeHead(200); res.end("ok");
       return;
     }
@@ -1372,7 +1380,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === "POST") {
       const body = await parseBody(req);
-      if (code) setShop(code, body);
+      if (code) await setShop(code, body);
       res.writeHead(200); res.end("ok");
       return;
     }
@@ -1717,7 +1725,9 @@ const server = http.createServer(async (req, res) => {
       const buf = Buffer.from(await ir.arrayBuffer());
       res.writeHead(200, { "Content-Type": ir.headers.get("content-type") || "image/jpeg", "Cache-Control": "public, max-age=86400" });
       res.end(buf);
-    } catch(e) { res.writeHead(502); res.end(); }
+    } catch(e) {
+      if (!res.headersSent) { res.writeHead(502); res.end(); }
+    }
     return;
   }
 
@@ -1728,6 +1738,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   res.writeHead(404); res.end();
+  } catch(e) {
+    console.error("[Server] Unhandled request error:", e.message);
+    if (!res.headersSent) { res.writeHead(500); res.end("Internal Server Error"); }
+  }
 });
 
 server.listen(PORT, async () => {
