@@ -201,7 +201,7 @@ async function refreshColes() {
     } catch(e) {}
   }
   if (!session.coles.buildId) {
-    session.coles.buildId = "20260225.2-125b188e5403326089f284f2886ed93482440af0";
+    // No fallback buildId — will retry on next request
   }
   session.coles.fetched = Date.now();
   console.log("[Coles] buildId:", session.coles.buildId);
@@ -484,53 +484,7 @@ function startColesTokenRefresh() {
 /* ============================================================
    SEARCH — COLES
    ============================================================ */
-async function searchColes(query, page) {
-  if (!page) page = 1;
-  await refreshColes();
-  const { buildId, cookies } = session.coles;
-  if (!buildId) throw new Error("Could not get Coles buildId");
-  const url = `https://www.coles.com.au/_next/data/${buildId}/en/search/products.json?q=${encodeURIComponent(query)}&page=${page}`;
-  const res = await fetch(url, {
-    headers: { ...BASE_HEADERS, "Accept": "application/json", "Referer": `https://www.coles.com.au/search/products?q=${encodeURIComponent(query)}`, "sec-fetch-site": "same-origin", "sec-fetch-mode": "cors", "sec-fetch-dest": "empty", ...(cookies ? { "Cookie": cookies } : {}) },
-    agent,
-  });
-  if (!res.ok) {
-    if (res.status === 404) { session.coles.buildId = ""; session.coles.fetched = 0; }
-    throw new Error("Coles HTTP " + res.status);
-  }
-  const data = await res.json();
-  const assetsUrl = data?.pageProps?.assetsUrl || "";
-  const results = data?.pageProps?.searchResults?.results || [];
-  return results.filter(p => p._type === "PRODUCT" && p.pricing && p.pricing.now > 0).map(p => {
-    const comparable = p.pricing?.comparable;
-    // Parse comparable into a normalised unitPrice string e.g. "$1.20 / 100g"
-    // Coles comparable can be an object {value, unit} or a plain string
-    let unitPrice = null;
-    if (comparable) {
-      if (typeof comparable === 'object' && comparable !== null) {
-        // Object form: { value: 1.2, unit: "100g" } or similar
-        const val = comparable.value ?? comparable.price ?? comparable.amount;
-        const u   = comparable.unit ?? comparable.per ?? comparable.measure;
-        if (val != null && u != null) unitPrice = '$' + parseFloat(val).toFixed(2) + ' / ' + u;
-        else unitPrice = JSON.stringify(comparable);
-      } else {
-        unitPrice = String(comparable).trim();
-      }
-    }
-    return {
-      name: p.name, brand: p.brand || null, price: p.pricing?.now,
-      wasPrice: p.pricing?.was || null, isOnSpecial: !!p.pricing?.promotionType,
-      unitPrice: unitPrice || null,
-      unit: p.size || null, imgUrl: p.imageUris?.[0]?.uri ? assetsUrl + p.imageUris[0].uri : null, id: p.id,
-      multiBuy: p.pricing?.multiBuyPromotion ? {
-        qty:     p.pricing.multiBuyPromotion.minQuantity,
-        price:   p.pricing.multiBuyPromotion.price,
-        priceEa: p.pricing.multiBuyPromotion.price / p.pricing.multiBuyPromotion.minQuantity,
-      } : null,
-      unavailable: false,
-    };
-  });
-}
+
 
 /* ============================================================
    SEARCH — WOOLWORTHS
@@ -565,50 +519,7 @@ async function searchWoolworths(query, page) {
 /* ============================================================
    SPECIALS — COLES
    ============================================================ */
-async function getColesSpecials(page) {
-  if (!page) page = 1;
-  await refreshColes();
-  const { buildId, cookies } = session.coles;
-  if (!buildId) throw new Error("Could not get Coles buildId");
-  const url = `https://www.coles.com.au/_next/data/${buildId}/en/on-special.json?page=${page}`;
-  const res = await fetch(url, {
-    headers: { ...BASE_HEADERS, "Accept": "application/json", "Referer": "https://www.coles.com.au/on-special", "sec-fetch-site": "same-origin", "sec-fetch-mode": "cors", "sec-fetch-dest": "empty", ...(cookies ? { "Cookie": cookies } : {}) },
-    agent,
-  });
-  if (!res.ok) {
-    if (res.status === 404) { session.coles.buildId = ""; session.coles.fetched = 0; }
-    throw new Error("Coles specials HTTP " + res.status);
-  }
-  const data = await res.json();
-  const assetsUrl = data?.pageProps?.assetsUrl || "";
-  const results = data?.pageProps?.searchResults?.results || [];
-  return results.filter(p => p._type === "PRODUCT" && p.pricing && p.pricing.now > 0).map(p => {
-    const comparable = p.pricing?.comparable;
-    let unitPrice = null;
-    if (comparable) {
-      if (typeof comparable === 'object' && comparable !== null) {
-        const val = comparable.value ?? comparable.price ?? comparable.amount;
-        const u   = comparable.unit ?? comparable.per ?? comparable.measure;
-        if (val != null && u != null) unitPrice = '$' + parseFloat(val).toFixed(2) + ' / ' + u;
-        else unitPrice = JSON.stringify(comparable);
-      } else {
-        unitPrice = String(comparable).trim();
-      }
-    }
-    return {
-      name: p.name, brand: p.brand || null, price: p.pricing?.now,
-      wasPrice: p.pricing?.was || null, isOnSpecial: true,
-      unitPrice: unitPrice || null,
-      unit: p.size || null, imgUrl: p.imageUris?.[0]?.uri ? assetsUrl + p.imageUris[0].uri : null, id: p.id,
-      multiBuy: p.pricing?.multiBuyPromotion ? {
-        qty:     p.pricing.multiBuyPromotion.minQuantity,
-        price:   p.pricing.multiBuyPromotion.price,
-        priceEa: p.pricing.multiBuyPromotion.price / p.pricing.multiBuyPromotion.minQuantity,
-      } : null,
-      unavailable: false,
-    };
-  });
-}
+
 
 /* ============================================================
    SPECIALS — WOOLWORTHS
@@ -1359,30 +1270,23 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (path === "/specials") {
+    // Coles handled device-side — server only returns Woolworths specials
     const page = parseInt(parsed.searchParams.get("page") || "1", 10);
-    let colesError = null, woolworthsError = null, coles = [], woolworths = [];
-    await Promise.all([
-      getColesSpecials(page).then(r => { coles = r; }).catch(e => { colesError = e.message; console.error("[Specials] Coles:", e.message); }),
-      getWoolworthsSpecials(page).then(r => { woolworths = r; }).catch(e => { woolworthsError = e.message; console.error("[Specials] Woolworths:", e.message); }),
-    ]);
+    let woolworthsError = null, woolworths = [];
+    await getWoolworthsSpecials(page).then(r => { woolworths = r; }).catch(e => { woolworthsError = e.message; });
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ coles, woolworths, colesError, woolworthsError }));
+    res.end(JSON.stringify({ coles: [], woolworths, colesError: null, woolworthsError }));
     return;
   }
 
   if (path === "/search") {
+    // Coles handled device-side — server only returns Woolworths search
     const q     = parsed.searchParams.get("q") || "";
     const page  = parseInt(parsed.searchParams.get("page") || "1", 10);
-    const store = parsed.searchParams.get("store") || "both";
-    let colesError = null, woolworthsError = null, coles = [], woolworths = [];
-    const tasks = [];
-    if (store === "both" || store === "coles")
-      tasks.push(searchColes(q, page).then(r => { coles = r; }).catch(e => { colesError = e.message; }));
-    if (store === "both" || store === "woolworths")
-      tasks.push(searchWoolworths(q, page).then(r => { woolworths = r; }).catch(e => { woolworthsError = e.message; }));
-    await Promise.all(tasks);
+    let woolworthsError = null, woolworths = [];
+    await searchWoolworths(q, page).then(r => { woolworths = r; }).catch(e => { woolworthsError = e.message; });
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ coles, woolworths, colesError, woolworthsError }));
+    res.end(JSON.stringify({ coles: [], woolworths, colesError: null, woolworthsError }));
     return;
   }
 
@@ -1771,7 +1675,7 @@ const server = http.createServer(async (req, res) => {
       const buf = Buffer.from(await ir.arrayBuffer());
       res.writeHead(200, { "Content-Type": ir.headers.get("content-type") || "image/jpeg", "Cache-Control": "public, max-age=86400" });
       res.end(buf);
-    } catch(e) { res.writeHead(502); res.end(); }
+    } catch(e) { if (!res.headersSent) { res.writeHead(502); res.end(); } }
     return;
   }
 
