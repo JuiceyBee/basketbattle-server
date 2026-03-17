@@ -478,76 +478,49 @@ function startColesTokenRefresh() {
    SEARCH — COLES
    ============================================================ */
 
-function parseColesComparable(comparable) {
-  if (!comparable) return null;
-  if (typeof comparable === 'object') {
-    const val = comparable.value ?? comparable.price ?? comparable.amount;
-    const u   = comparable.unit ?? comparable.per ?? comparable.measure;
-    if (val != null && u != null) return '$' + parseFloat(val).toFixed(2) + ' / ' + u;
-    return JSON.stringify(comparable);
-  }
-  return String(comparable).trim();
-}
-
-function mapColesProduct(p, assetsUrl, forceSpecial) {
-  return {
-    name:        p.name,
-    brand:       p.brand || null,
-    price:       p.pricing?.now,
-    wasPrice:    p.pricing?.was || null,
-    isOnSpecial: forceSpecial || !!p.pricing?.promotionType,
-    unitPrice:   parseColesComparable(p.pricing?.comparable),
-    unit:        p.size || null,
-    imgUrl:      p.imageUris?.[0]?.uri ? (assetsUrl || '') + p.imageUris[0].uri : null,
-    id:          p.id,
-    multiBuy:    p.pricing?.multiBuyPromotion ? {
-      qty:     p.pricing.multiBuyPromotion.minQuantity,
-      price:   p.pricing.multiBuyPromotion.price,
-      priceEa: p.pricing.multiBuyPromotion.price / p.pricing.multiBuyPromotion.minQuantity,
-    } : null,
-    unavailable: false,
-  };
-}
 async function searchColes(query, page) {
   if (!page) page = 1;
   await refreshColes();
-  const cookies = session.coles.cookies || '';
-
-  // Try the direct JSON search API first (no buildId needed)
-  const directUrl = `https://www.coles.com.au/api/2.0/product-browser/search?q=${encodeURIComponent(query)}&page=${page}&pageSize=24`;
-  try {
-    const res = await fetch(directUrl, {
-      headers: { ...BASE_HEADERS, 'Accept': 'application/json', 'Referer': `https://www.coles.com.au/search/products?q=${encodeURIComponent(query)}`, 'sec-fetch-site': 'same-origin', 'sec-fetch-mode': 'cors', ...(cookies ? { Cookie: cookies } : {}) },
-      agent,
-    });
-    if (res.ok) {
-      const data = await res.json();
-      const results = data?.results || data?.Products || data?.products || [];
-      if (results.length > 0) {
-        return results
-          .filter(p => p.pricing && p.pricing.now > 0)
-          .map(p => mapColesProduct(p, '', false));
-      }
-    }
-  } catch(e) { console.warn('[Coles] direct API error:', e.message); }
-
-  // Fallback: _next/data buildId approach
-  const { buildId } = session.coles;
-  if (!buildId) throw new Error('Could not get Coles buildId');
+  const { buildId, cookies } = session.coles;
+  if (!buildId) throw new Error("Could not get Coles buildId");
   const url = `https://www.coles.com.au/_next/data/${buildId}/en/search/products.json?q=${encodeURIComponent(query)}&page=${page}`;
   const res = await fetch(url, {
-    headers: { ...BASE_HEADERS, 'Accept': 'application/json', 'Referer': `https://www.coles.com.au/search/products?q=${encodeURIComponent(query)}`, 'sec-fetch-site': 'same-origin', 'sec-fetch-mode': 'cors', 'sec-fetch-dest': 'empty', ...(cookies ? { Cookie: cookies } : {}) },
+    headers: { ...BASE_HEADERS, "Accept": "application/json", "Referer": `https://www.coles.com.au/search/products?q=${encodeURIComponent(query)}`, "sec-fetch-site": "same-origin", "sec-fetch-mode": "cors", "sec-fetch-dest": "empty", ...(cookies ? { "Cookie": cookies } : {}) },
     agent,
   });
   if (!res.ok) {
-    if (res.status === 404) { session.coles.buildId = ''; session.coles.fetched = 0; }
-    throw new Error('Coles HTTP ' + res.status);
+    if (res.status === 404) { session.coles.buildId = ""; session.coles.fetched = 0; }
+    throw new Error("Coles HTTP " + res.status);
   }
   const data = await res.json();
-  const assetsUrl = data?.pageProps?.assetsUrl || '';
-  return (data?.pageProps?.searchResults?.results || [])
-    .filter(p => p._type === 'PRODUCT' && p.pricing && p.pricing.now > 0)
-    .map(p => mapColesProduct(p, assetsUrl, false));
+  const assetsUrl = data?.pageProps?.assetsUrl || "";
+  const results = data?.pageProps?.searchResults?.results || [];
+  return results.filter(p => p._type === "PRODUCT" && p.pricing && p.pricing.now > 0).map(p => {
+    const comparable = p.pricing?.comparable;
+    let unitPrice = null;
+    if (comparable) {
+      if (typeof comparable === 'object' && comparable !== null) {
+        const val = comparable.value ?? comparable.price ?? comparable.amount;
+        const u   = comparable.unit ?? comparable.per ?? comparable.measure;
+        if (val != null && u != null) unitPrice = '$' + parseFloat(val).toFixed(2) + ' / ' + u;
+        else unitPrice = JSON.stringify(comparable);
+      } else {
+        unitPrice = String(comparable).trim();
+      }
+    }
+    return {
+      name: p.name, brand: p.brand || null, price: p.pricing?.now,
+      wasPrice: p.pricing?.was || null, isOnSpecial: !!p.pricing?.promotionType,
+      unitPrice: unitPrice || null,
+      unit: p.size || null, imgUrl: p.imageUris?.[0]?.uri ? assetsUrl + p.imageUris[0].uri : null, id: p.id,
+      multiBuy: p.pricing?.multiBuyPromotion ? {
+        qty:     p.pricing.multiBuyPromotion.minQuantity,
+        price:   p.pricing.multiBuyPromotion.price,
+        priceEa: p.pricing.multiBuyPromotion.price / p.pricing.multiBuyPromotion.minQuantity,
+      } : null,
+      unavailable: false,
+    };
+  });
 }
 
 
@@ -593,47 +566,47 @@ async function searchWoolworths(query, page) {
 async function getColesSpecials(page) {
   if (!page) page = 1;
   await refreshColes();
-  const cookies = session.coles.cookies || '';
-
-  // Try direct specials API first
-  const directUrl = `https://www.coles.com.au/api/2.0/product-browser/browse?categoryId=on-special&page=${page}&pageSize=48`;
-  try {
-    const res = await fetch(directUrl, {
-      headers: { ...BASE_HEADERS, 'Accept': 'application/json', 'Referer': 'https://www.coles.com.au/on-special', 'sec-fetch-site': 'same-origin', 'sec-fetch-mode': 'cors', ...(cookies ? { Cookie: cookies } : {}) },
-      agent,
-    });
-    if (res.ok) {
-      const data = await res.json();
-      const results = data?.results || data?.Products || data?.products || [];
-      if (results.length > 0) {
-        return results
-          .filter(p => p.pricing && p.pricing.now > 0)
-          .map(p => mapColesProduct(p, '', true));
-      }
-    }
-  } catch(e) { console.warn('[Coles] direct specials API error:', e.message); }
-
-  // Fallback: _next/data buildId approach
-  const { buildId } = session.coles;
-  if (!buildId) throw new Error('Could not get Coles buildId');
+  const { buildId, cookies } = session.coles;
+  if (!buildId) throw new Error("Could not get Coles buildId");
   const url = `https://www.coles.com.au/_next/data/${buildId}/en/on-special.json?page=${page}`;
   const res = await fetch(url, {
-    headers: { ...BASE_HEADERS, 'Accept': 'application/json', 'Referer': 'https://www.coles.com.au/on-special', 'sec-fetch-site': 'same-origin', 'sec-fetch-mode': 'cors', 'sec-fetch-dest': 'empty', ...(cookies ? { Cookie: cookies } : {}) },
+    headers: { ...BASE_HEADERS, "Accept": "application/json", "Referer": "https://www.coles.com.au/on-special", "sec-fetch-site": "same-origin", "sec-fetch-mode": "cors", "sec-fetch-dest": "empty", ...(cookies ? { "Cookie": cookies } : {}) },
     agent,
   });
   if (!res.ok) {
-    if (res.status === 404) { session.coles.buildId = ''; session.coles.fetched = 0; }
-    throw new Error('Coles specials HTTP ' + res.status);
+    if (res.status === 404) { session.coles.buildId = ""; session.coles.fetched = 0; }
+    throw new Error("Coles specials HTTP " + res.status);
   }
   const data = await res.json();
-  const assetsUrl = data?.pageProps?.assetsUrl || '';
-  return (data?.pageProps?.searchResults?.results || [])
-    .filter(p => p._type === 'PRODUCT' && p.pricing && p.pricing.now > 0)
-    .map(p => mapColesProduct(p, assetsUrl, true));
+  const assetsUrl = data?.pageProps?.assetsUrl || "";
+  const results = data?.pageProps?.searchResults?.results || [];
+  return results.filter(p => p._type === "PRODUCT" && p.pricing && p.pricing.now > 0).map(p => {
+    const comparable = p.pricing?.comparable;
+    let unitPrice = null;
+    if (comparable) {
+      if (typeof comparable === 'object' && comparable !== null) {
+        const val = comparable.value ?? comparable.price ?? comparable.amount;
+        const u   = comparable.unit ?? comparable.per ?? comparable.measure;
+        if (val != null && u != null) unitPrice = '$' + parseFloat(val).toFixed(2) + ' / ' + u;
+        else unitPrice = JSON.stringify(comparable);
+      } else {
+        unitPrice = String(comparable).trim();
+      }
+    }
+    return {
+      name: p.name, brand: p.brand || null, price: p.pricing?.now,
+      wasPrice: p.pricing?.was || null, isOnSpecial: true,
+      unitPrice: unitPrice || null,
+      unit: p.size || null, imgUrl: p.imageUris?.[0]?.uri ? assetsUrl + p.imageUris[0].uri : null, id: p.id,
+      multiBuy: p.pricing?.multiBuyPromotion ? {
+        qty:     p.pricing.multiBuyPromotion.minQuantity,
+        price:   p.pricing.multiBuyPromotion.price,
+        priceEa: p.pricing.multiBuyPromotion.price / p.pricing.multiBuyPromotion.minQuantity,
+      } : null,
+      unavailable: false,
+    };
+  });
 }
-
-
-
 /* ============================================================
    SPECIALS — WOOLWORTHS
    ============================================================ */
