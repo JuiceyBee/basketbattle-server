@@ -196,11 +196,8 @@ async function refreshColes() {
       }
     } catch(e) {}
   }
-  if (!session.coles.buildId) {
-    session.coles.buildId = "20260225.2-125b188e5403326089f284f2886ed93482440af0";
-  }
-  session.coles.fetched = Date.now();
-  console.log("[Coles] buildId:", session.coles.buildId);
+  session.coles.fetched = session.coles.buildId ? Date.now() : 0; // only cache if we got one
+  console.log("[Coles] buildId:", session.coles.buildId || "FAILED — will retry on next request");
   if (!colesCartConfig.subscriptionKey) {
     await refreshColesSubscriptionKey();
   }
@@ -491,7 +488,34 @@ async function searchColes(query, page) {
     agent,
   });
   if (!res.ok) {
-    if (res.status === 404) { session.coles.buildId = ""; session.coles.fetched = 0; }
+    if (res.status === 404) {
+      // buildId is stale — force refresh and retry once
+      session.coles.buildId = ""; session.coles.fetched = 0;
+      await refreshColes();
+      if (!session.coles.buildId) throw new Error("Coles buildId unavailable");
+      const retryUrl = `https://www.coles.com.au/_next/data/${session.coles.buildId}/en/search/products.json?q=${encodeURIComponent(query)}&page=${page}`;
+      const retryRes = await fetch(retryUrl, {
+        headers: { ...BASE_HEADERS, "Accept": "application/json", "Referer": `https://www.coles.com.au/search/products?q=${encodeURIComponent(query)}`, "sec-fetch-site": "same-origin", "sec-fetch-mode": "cors", "sec-fetch-dest": "empty", ...(session.coles.cookies ? { "Cookie": session.coles.cookies } : {}) },
+        agent,
+      });
+      if (!retryRes.ok) throw new Error("Coles HTTP " + retryRes.status + " (after buildId refresh)");
+      const retryData = await retryRes.json();
+      const retryAssetsUrl = retryData?.pageProps?.assetsUrl || "";
+      const retryResults = retryData?.pageProps?.searchResults?.results || [];
+      return retryResults.filter(p => p._type === "PRODUCT" && p.pricing && p.pricing.now > 0).map(p => {
+        const comparable = p.pricing?.comparable;
+        let unitPrice = null;
+        if (comparable) {
+          if (typeof comparable === 'object' && comparable !== null) {
+            const val = comparable.value ?? comparable.price ?? comparable.amount;
+            const u   = comparable.unit ?? comparable.per ?? comparable.measure;
+            if (val != null && u != null) unitPrice = '$' + parseFloat(val).toFixed(2) + ' / ' + u;
+            else unitPrice = JSON.stringify(comparable);
+          } else { unitPrice = String(comparable).trim(); }
+        }
+        return { name: p.name, brand: p.brand || null, price: p.pricing?.now, wasPrice: p.pricing?.was || null, isOnSpecial: !!p.pricing?.promotionType, unitPrice: unitPrice || null, unit: p.size || null, imgUrl: p.imageUris?.[0]?.uri ? retryAssetsUrl + p.imageUris[0].uri : null, id: p.id, multiBuy: p.pricing?.multiBuyPromotion ? { qty: p.pricing.multiBuyPromotion.minQuantity, price: p.pricing.multiBuyPromotion.price, priceEa: p.pricing.multiBuyPromotion.price / p.pricing.multiBuyPromotion.minQuantity } : null, unavailable: false };
+      });
+    }
     throw new Error("Coles HTTP " + res.status);
   }
   const data = await res.json();
@@ -577,7 +601,19 @@ async function getColesSpecials(page) {
     agent,
   });
   if (!res.ok) {
-    if (res.status === 404) { session.coles.buildId = ""; session.coles.fetched = 0; }
+    if (res.status === 404) {
+      session.coles.buildId = ""; session.coles.fetched = 0;
+      await refreshColes();
+      if (!session.coles.buildId) throw new Error("Coles buildId unavailable for specials");
+      const retrySpecialsUrl = `https://www.coles.com.au/_next/data/${session.coles.buildId}/en/on-special.json?page=${page}`;
+      const retrySpecialsRes = await fetch(retrySpecialsUrl, {
+        headers: { ...BASE_HEADERS, "Accept": "application/json", "Referer": "https://www.coles.com.au/on-special", "sec-fetch-site": "same-origin", "sec-fetch-mode": "cors", "sec-fetch-dest": "empty", ...(session.coles.cookies ? { "Cookie": session.coles.cookies } : {}) },
+        agent,
+      });
+      if (!retrySpecialsRes.ok) throw new Error("Coles specials HTTP " + retrySpecialsRes.status + " (after refresh)");
+      // Re-run with fresh buildId by recursing once
+      return getColesSpecials(page);
+    }
     throw new Error("Coles specials HTTP " + res.status);
   }
   const data = await res.json();
