@@ -1,29 +1,19 @@
 const http = require("http");
 const https = require("https");
 const fs = require("fs");
-
-const PORT = process.env.PORT || 3000;
-const agent = new https.Agent({ rejectUnauthorized: false });
-
-/* ============================================================
-   UPSTASH REDIS — persistent KV storage (survives Render restarts)
-   Set UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN in Render env vars.
-   ============================================================ */
+// ── Upstash Redis REST client ─────────────────────────────────────────────
 const UPSTASH_URL   = process.env.UPSTASH_REDIS_REST_URL;
 const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
 
 async function kvGet(key) {
   if (!UPSTASH_URL) return null;
   try {
-    const res = await fetch(`${UPSTASH_URL}/get/${encodeURIComponent(key)}`, {
-      headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` },
-    });
-    const data = await res.json();
-    if (data.result == null) return null;
-    return JSON.parse(data.result);
-  } catch(e) { console.warn('[KV] get error:', e.message); return null; }
+    const r = await fetch(`${UPSTASH_URL}/get/${encodeURIComponent(key)}`,
+      { headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` } });
+    const j = await r.json();
+    return j.result ? JSON.parse(j.result) : null;
+  } catch { return null; }
 }
-
 async function kvSet(key, value) {
   if (!UPSTASH_URL) return;
   try {
@@ -32,27 +22,41 @@ async function kvSet(key, value) {
       headers: { Authorization: `Bearer ${UPSTASH_TOKEN}`, 'Content-Type': 'application/json' },
       body: JSON.stringify(JSON.stringify(value)),
     });
-  } catch(e) { console.warn('[KV] set error:', e.message); }
+  } catch(e) { console.warn('[KV] set error', e.message); }
+}
+async function kvDel(key) {
+  if (!UPSTASH_URL) return;
+  try {
+    await fetch(`${UPSTASH_URL}/del/${encodeURIComponent(key)}`, {
+      method: 'POST', headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` },
+    });
+  } catch {}
+}
+async function kvKeys(pattern) {
+  if (!UPSTASH_URL) return [];
+  try {
+    const r = await fetch(`${UPSTASH_URL}/keys/${encodeURIComponent(pattern)}`,
+      { headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` } });
+    const j = await r.json();
+    return j.result || [];
+  } catch { return []; }
+}
+function randomCode(len = 8) {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let s = '';
+  for (let i = 0; i < len; i++) s += chars[Math.floor(Math.random() * chars.length)];
+  return s;
+}
+async function isValidToken(token) {
+  if (!token) return false;
+  const data = await kvGet(`bb:token:${token}`);
+  return !!data;
 }
 
-async function kvGetAll(prefix) {
-  // Returns { key: value, ... } for all keys matching prefix
-  if (!UPSTASH_URL) return {};
-  try {
-    const scanRes = await fetch(`${UPSTASH_URL}/scan/0?match=${encodeURIComponent(prefix + '*')}&count=1000`, {
-      headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` },
-    });
-    const scanData = await scanRes.json();
-    const keys = (scanData.result && scanData.result[1]) || [];
-    if (!keys.length) return {};
-    const result = {};
-    await Promise.all(keys.map(async k => {
-      const val = await kvGet(k);
-      if (val != null) result[k] = val;
-    }));
-    return result;
-  } catch(e) { console.warn('[KV] getAll error:', e.message); return {}; }
-}
+
+
+const PORT = 3000;
+const agent = new https.Agent({ rejectUnauthorized: false });
 
 const BASE_HEADERS = {
   "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -180,9 +184,7 @@ async function refreshColes() {
         headers: { ...BASE_HEADERS, "Accept": "text/html,*/*", "sec-fetch-site": "none", "sec-fetch-mode": "navigate", "sec-fetch-dest": "document" },
         agent, redirect: "follow",
       });
-      console.log("[Coles] refreshColes fetched", pageUrl, "→ HTTP", res.status);
       const html = await res.text();
-      console.log("[Coles] HTML length:", html.length, "| first 200:", html.slice(0, 200).replace(/\n/g, ' '));
       const sc = res.headers.get("set-cookie") || "";
       let buildId = "";
       const m1 = html.match(/"buildId"\s*:\s*"([^"]+)"/);
@@ -191,18 +193,18 @@ async function refreshColes() {
         const m2 = html.match(/\/_next\/static\/([a-zA-Z0-9._-]+)\/_buildManifest/);
         if (m2) buildId = m2[1];
       }
-      console.log("[Coles] buildId from", pageUrl, ":", buildId || "NOT FOUND");
       if (buildId) {
         session.coles.buildId = buildId;
         if (sc) session.coles.cookies = sc.split(",").map(c => c.split(";")[0].trim()).join("; ");
         break;
       }
-    } catch(e) {
-      console.warn("[Coles] refreshColes error for", pageUrl, ":", e.message);
-    }
+    } catch(e) {}
   }
-  session.coles.fetched = session.coles.buildId ? Date.now() : 0;
-  console.log("[Coles] buildId:", session.coles.buildId || "FAILED — will retry on next request");
+  if (!session.coles.buildId) {
+    session.coles.buildId = "20260225.2-125b188e5403326089f284f2886ed93482440af0";
+  }
+  session.coles.fetched = Date.now();
+  console.log("[Coles] buildId:", session.coles.buildId);
   if (!colesCartConfig.subscriptionKey) {
     await refreshColesSubscriptionKey();
   }
@@ -482,7 +484,6 @@ function startColesTokenRefresh() {
 /* ============================================================
    SEARCH — COLES
    ============================================================ */
-
 async function searchColes(query, page) {
   if (!page) page = 1;
   await refreshColes();
@@ -502,9 +503,12 @@ async function searchColes(query, page) {
   const results = data?.pageProps?.searchResults?.results || [];
   return results.filter(p => p._type === "PRODUCT" && p.pricing && p.pricing.now > 0).map(p => {
     const comparable = p.pricing?.comparable;
+    // Parse comparable into a normalised unitPrice string e.g. "$1.20 / 100g"
+    // Coles comparable can be an object {value, unit} or a plain string
     let unitPrice = null;
     if (comparable) {
       if (typeof comparable === 'object' && comparable !== null) {
+        // Object form: { value: 1.2, unit: "100g" } or similar
         const val = comparable.value ?? comparable.price ?? comparable.amount;
         const u   = comparable.unit ?? comparable.per ?? comparable.measure;
         if (val != null && u != null) unitPrice = '$' + parseFloat(val).toFixed(2) + ' / ' + u;
@@ -527,8 +531,6 @@ async function searchColes(query, page) {
     };
   });
 }
-
-
 
 /* ============================================================
    SEARCH — WOOLWORTHS
@@ -555,11 +557,6 @@ async function searchWoolworths(query, page) {
       unitPrice: item.CupString || null, unit: item.PackageSize || null,
       imgUrl: item.SmallImageFile ? item.SmallImageFile.replace('/small/', '/large/') : null,
       stockcode: item.Stockcode,
-      multiBuy: (item.MultiBuyQuantity && item.MultiBuyBasePrice) ? {
-        qty:     item.MultiBuyQuantity,
-        price:   item.MultiBuyBasePrice,
-        priceEa: item.MultiBuyBasePrice / item.MultiBuyQuantity,
-      } : null,
       unavailable: !item.Price || item.Price <= 0 || item.IsAvailable === false,
     }));
   });
@@ -612,6 +609,7 @@ async function getColesSpecials(page) {
     };
   });
 }
+
 /* ============================================================
    SPECIALS — WOOLWORTHS
    ============================================================ */
@@ -1163,69 +1161,87 @@ function getList(code) {
   if (!code) return { coles: [], woolworths: [] };
   return householdLists[code] || { coles: [], woolworths: [] };
 }
-async function setList(code, data) {
+function setList(code, data) {
   if (!code) return;
   householdLists[code] = data;
-  await kvSet('list:' + code, data);
+  saveListsToDisk();
   broadcast('list-update', { code, list: data }, code);
 }
 function getShop(code) {
   if (!code) return { coles: [], woolworths: [] };
   return householdShops[code] || { coles: [], woolworths: [] };
 }
-async function setShop(code, data) {
+function setShop(code, data) {
   if (!code) return;
   householdShops[code] = data;
-  await kvSet('shop:' + code, data);
+  saveShopsToDisk();
   broadcast('shop-update', { code, shopList: data }, code);
 }
 
 /* ============================================================
-   HOUSEHOLD DATA PERSISTENCE — backed by Upstash Redis
-   Keys: battles:{CODE}, history:{CODE}, list:{CODE}, shop:{CODE}
-   In-memory cache for the lifetime of the process (speeds up reads,
-   Upstash is the source of truth across restarts).
+   HOUSEHOLD BATTLES PERSISTENCE
    ============================================================ */
+const BATTLES_FILE = "./battles.json";
+const LISTS_FILE   = "./lists.json";
+const SHOPS_FILE   = "./shops.json";
+const HISTORY_FILE = "./history.json";
 let allHouseholdBattles = {};
-let householdHistory    = {};
-let householdLists2     = {}; // renamed to avoid conflict with householdLists below
-let householdShops2     = {};
+let householdHistory = {}; // { code: [ { id, date, coles: {total, items}, woolworths: {total, items} } ] }
 
-// ── Battles ──────────────────────────────────────────────────
-async function loadBattlesFromKV() {
-  const all = await kvGetAll('battles:');
-  for (const [k, v] of Object.entries(all)) {
-    const code = k.replace('battles:', '');
-    allHouseholdBattles[code] = v;
-  }
-  console.log('[Battles] Loaded', Object.keys(allHouseholdBattles).length, 'household(s) from KV.');
+function loadBattlesFromDisk() {
+  try {
+    if (fs.existsSync(BATTLES_FILE)) {
+      allHouseholdBattles = JSON.parse(fs.readFileSync(BATTLES_FILE, "utf8"));
+      console.log("[Battles] Loaded", Object.keys(allHouseholdBattles).length, "household(s) from disk.");
+    }
+  } catch(e) { console.warn("[Battles] Could not load battles:", e.message); }
 }
 
-async function saveBattlesToKV(code, groups) {
-  await kvSet('battles:' + code, groups);
+function saveBattlesToDisk() {
+  try { fs.writeFileSync(BATTLES_FILE, JSON.stringify(allHouseholdBattles, null, 2)); }
+  catch(e) { console.warn("[Battles] Could not save battles:", e.message); }
 }
 
-function getBattles(code) {
-  if (!code) return [];
-  return allHouseholdBattles[code.toUpperCase()] || [];
+function loadListsFromDisk() {
+  try {
+    if (fs.existsSync(LISTS_FILE)) {
+      householdLists = JSON.parse(fs.readFileSync(LISTS_FILE, "utf8"));
+      console.log("[Lists] Loaded", Object.keys(householdLists).length, "household(s) from disk.");
+    }
+  } catch(e) { console.warn("[Lists] Could not load lists:", e.message); }
 }
 
-async function setBattles(code, groups) {
-  if (!code) return;
-  const key = code.toUpperCase();
-  allHouseholdBattles[key] = groups;
-  await saveBattlesToKV(key, groups);
-  broadcast('battles-update', { code: key, groups });
+function saveListsToDisk() {
+  try { fs.writeFileSync(LISTS_FILE, JSON.stringify(householdLists, null, 2)); }
+  catch(e) { console.warn("[Lists] Could not save lists:", e.message); }
 }
 
-// ── History ───────────────────────────────────────────────────
-async function loadHistoryFromKV() {
-  const all = await kvGetAll('history:');
-  for (const [k, v] of Object.entries(all)) {
-    const code = k.replace('history:', '');
-    householdHistory[code] = v;
-  }
-  console.log('[History] Loaded', Object.keys(householdHistory).length, 'household(s) from KV.');
+function loadShopsFromDisk() {
+  try {
+    if (fs.existsSync(SHOPS_FILE)) {
+      householdShops = JSON.parse(fs.readFileSync(SHOPS_FILE, "utf8"));
+      console.log("[Shops] Loaded", Object.keys(householdShops).length, "household(s) from disk.");
+    }
+  } catch(e) { console.warn("[Shops] Could not load shops:", e.message); }
+}
+
+function saveShopsToDisk() {
+  try { fs.writeFileSync(SHOPS_FILE, JSON.stringify(householdShops, null, 2)); }
+  catch(e) { console.warn("[Shops] Could not save shops:", e.message); }
+}
+
+function loadHistoryFromDisk() {
+  try {
+    if (fs.existsSync(HISTORY_FILE)) {
+      householdHistory = JSON.parse(fs.readFileSync(HISTORY_FILE, "utf8"));
+      console.log("[History] Loaded", Object.keys(householdHistory).length, "household(s) from disk.");
+    }
+  } catch(e) { console.warn("[History] Could not load history:", e.message); }
+}
+
+function saveHistoryToDisk() {
+  try { fs.writeFileSync(HISTORY_FILE, JSON.stringify(householdHistory, null, 2)); }
+  catch(e) { console.warn("[History] Could not save history:", e.message); }
 }
 
 function getHistory(code) {
@@ -1233,34 +1249,28 @@ function getHistory(code) {
   return householdHistory[code.toUpperCase()] || [];
 }
 
-async function addHistory(code, entry) {
+function addHistory(code, entry) {
   if (!code) return;
   const key = code.toUpperCase();
   if (!householdHistory[key]) householdHistory[key] = [];
-  householdHistory[key].unshift(entry);
+  householdHistory[key].unshift(entry); // newest first
+  // Keep max 50 entries per household
   if (householdHistory[key].length > 50) householdHistory[key] = householdHistory[key].slice(0, 50);
-  await kvSet('history:' + key, householdHistory[key]);
+  saveHistoryToDisk();
   broadcast('history-update', { code: key, history: householdHistory[key] }, key);
 }
 
-// ── Lists ─────────────────────────────────────────────────────
-async function loadListsFromKV() {
-  const all = await kvGetAll('list:');
-  for (const [k, v] of Object.entries(all)) {
-    const code = k.replace('list:', '');
-    householdLists[code] = v;
-  }
-  console.log('[Lists] Loaded', Object.keys(householdLists).length, 'household(s) from KV.');
+function getBattles(code) {
+  if (!code) return [];
+  return allHouseholdBattles[code.toUpperCase()] || [];
 }
 
-// ── Shops ─────────────────────────────────────────────────────
-async function loadShopsFromKV() {
-  const all = await kvGetAll('shop:');
-  for (const [k, v] of Object.entries(all)) {
-    const code = k.replace('shop:', '');
-    householdShops[code] = v;
-  }
-  console.log('[Shops] Loaded', Object.keys(householdShops).length, 'household(s) from KV.');
+function setBattles(code, groups) {
+  if (!code) return;
+  allHouseholdBattles[code.toUpperCase()] = groups;
+  saveBattlesToDisk();
+  // broadcast to all clients with this household code
+  broadcast('battles-update', { code: code.toUpperCase(), groups });
 }
 
 function broadcast(event, data, targetCode) {
@@ -1289,18 +1299,64 @@ function parseBody(req) {
    HTTP SERVER
    ============================================================ */
 const server = http.createServer(async (req, res) => {
-  // Global error guard — prevent any unhandled error from crashing the server
-  res.on('error', (e) => console.warn('[HTTP] Response error:', e.message));
-  try {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, x-bb-access");
   if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
 
   const parsed = new URL(req.url, "http://localhost");
   const path = parsed.pathname;
 
   if (path === "/ping") { res.writeHead(200); res.end("ok"); return; }
+
+  // ── Public: redeem invite → permanent token ──────────────────────────────
+  if (path === "/redeem-invite" && req.method === "POST") {
+    const body = await parseBody(req);
+    const code = (body.code || '').trim().toUpperCase();
+    if (!code) { res.writeHead(400); res.end(JSON.stringify({ error: 'No code' })); return; }
+    const inviteData = await kvGet(`bb:invite:${code}`);
+    if (!inviteData) { res.writeHead(401, {'Content-Type':'application/json'}); res.end(JSON.stringify({ ok: false, error: 'Invalid invite code' })); return; }
+    if (inviteData.used) { res.writeHead(401, {'Content-Type':'application/json'}); res.end(JSON.stringify({ ok: false, error: 'Invite code already used' })); return; }
+    const token = randomCode(24);
+    const now = new Date().toISOString();
+    await kvSet(`bb:invite:${code}`, { ...inviteData, used: true, usedAt: now, token });
+    await kvSet(`bb:token:${token}`, { createdAt: now, label: inviteData.label || code, inviteCode: code });
+    console.log(`[Access] Invite ${code} redeemed → token issued`);
+    res.writeHead(200, {'Content-Type':'application/json'}); res.end(JSON.stringify({ ok: true, token })); return;
+  }
+
+  // ── Admin: create invite codes ────────────────────────────────────────────
+  if (path === "/admin/invite" && req.method === "POST") {
+    const body = await parseBody(req);
+    if (body.adminKey !== process.env.BB_ADMIN_KEY) { res.writeHead(403); res.end(JSON.stringify({ error: 'Forbidden' })); return; }
+    const count = Math.min(20, parseInt(body.count || '1', 10));
+    const codes = [];
+    for (let i = 0; i < count; i++) {
+      const code = randomCode(8);
+      await kvSet(`bb:invite:${code}`, { createdAt: new Date().toISOString(), label: body.label || '', used: false });
+      codes.push(code);
+    }
+    res.writeHead(200, {'Content-Type':'application/json'}); res.end(JSON.stringify({ ok: true, codes })); return;
+  }
+
+  // ── Admin: list all invites + tokens ──────────────────────────────────────
+  if (path === "/admin/invites" && req.method === "POST") {
+    const body = await parseBody(req);
+    if (body.adminKey !== process.env.BB_ADMIN_KEY) { res.writeHead(403); res.end(JSON.stringify({ error: 'Forbidden' })); return; }
+    const inviteKeys = await kvKeys('bb:invite:*');
+    const tokenKeys  = await kvKeys('bb:token:*');
+    const invites = await Promise.all(inviteKeys.map(async k => { const d = await kvGet(k); return { code: k.replace('bb:invite:',''), ...d }; }));
+    const tokens  = await Promise.all(tokenKeys.map(async k => { const d = await kvGet(k); return { token: k.replace('bb:token:',''), ...d }; }));
+    res.writeHead(200, {'Content-Type':'application/json'}); res.end(JSON.stringify({ invites, tokens })); return;
+  }
+
+  // ── Admin: revoke a token ─────────────────────────────────────────────────
+  if (path === "/admin/revoke" && req.method === "POST") {
+    const body = await parseBody(req);
+    if (body.adminKey !== process.env.BB_ADMIN_KEY) { res.writeHead(403); res.end(JSON.stringify({ error: 'Forbidden' })); return; }
+    await kvDel(`bb:token:${body.token}`);
+    res.writeHead(200, {'Content-Type':'application/json'}); res.end(JSON.stringify({ ok: true })); return;
+  }
 
   if (path === "/specials") {
     const page = parseInt(parsed.searchParams.get("page") || "1", 10);
@@ -1330,26 +1386,24 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ── All other routes require a valid access token ─────────────────────────
+  const bbToken = req.headers['x-bb-access'] || parsed.searchParams.get('access') || '';
+  if (!(await isValidToken(bbToken))) {
+    res.writeHead(401, {'Content-Type':'application/json'});
+    res.end(JSON.stringify({ error: 'Unauthorised' })); return;
+  }
+
   if (path === "/battles") {
     const code = parsed.searchParams.get("code") || "";
     if (!code) { res.writeHead(400, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "No household code" })); return; }
     if (req.method === "GET") {
-      // If not in memory cache, try fetching from KV directly
-      let groups = getBattles(code);
-      if (!groups.length) {
-        const fromKV = await kvGet('battles:' + code.toUpperCase());
-        if (fromKV) {
-          allHouseholdBattles[code.toUpperCase()] = fromKV;
-          groups = fromKV;
-        }
-      }
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ groups }));
+      res.end(JSON.stringify({ groups: getBattles(code) }));
       return;
     }
     if (req.method === "POST") {
       const body = await parseBody(req);
-      await setBattles(code, body.groups || []);
+      setBattles(code, body.groups || []);
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true }));
       return;
@@ -1365,7 +1419,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === "POST") {
       const body = await parseBody(req);
-      if (code) await setList(code, body);
+      if (code) setList(code, body);
       res.writeHead(200); res.end("ok");
       return;
     }
@@ -1380,7 +1434,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === "POST") {
       const body = await parseBody(req);
-      if (code) await setShop(code, body);
+      if (code) setShop(code, body);
       res.writeHead(200); res.end("ok");
       return;
     }
@@ -1390,21 +1444,13 @@ const server = http.createServer(async (req, res) => {
     const code = parsed.searchParams.get("code") || "";
     if (!code) { res.writeHead(400); res.end("No code"); return; }
     if (req.method === "GET") {
-      let history = getHistory(code);
-      if (!history.length) {
-        const fromKV = await kvGet('history:' + code.toUpperCase());
-        if (fromKV) {
-          householdHistory[code.toUpperCase()] = fromKV;
-          history = fromKV;
-        }
-      }
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ history }));
+      res.end(JSON.stringify({ history: getHistory(code) }));
       return;
     }
     if (req.method === "POST") {
       const body = await parseBody(req);
-      if (body.entry) await addHistory(code, body.entry);
+      if (body.entry) addHistory(code, body.entry);
       res.writeHead(200); res.end("ok");
       return;
     }
@@ -1725,9 +1771,7 @@ const server = http.createServer(async (req, res) => {
       const buf = Buffer.from(await ir.arrayBuffer());
       res.writeHead(200, { "Content-Type": ir.headers.get("content-type") || "image/jpeg", "Cache-Control": "public, max-age=86400" });
       res.end(buf);
-    } catch(e) {
-      if (!res.headersSent) { res.writeHead(502); res.end(); }
-    }
+    } catch(e) { res.writeHead(502); res.end(); }
     return;
   }
 
@@ -1738,26 +1782,15 @@ const server = http.createServer(async (req, res) => {
   }
 
   res.writeHead(404); res.end();
-  } catch(e) {
-    console.error("[Server] Unhandled request error:", e.message);
-    if (!res.headersSent) { res.writeHead(500); res.end("Internal Server Error"); }
-  }
 });
 
 server.listen(PORT, async () => {
   console.log("Basket Battle running on port", PORT);
   loadCookiesFromDisk();
-  // Load household data from Upstash KV (persists across Render restarts)
-  Promise.all([
-    loadBattlesFromKV(),
-    loadHistoryFromKV(),
-    loadListsFromKV(),
-    loadShopsFromKV(),
-  ]).then(() => {
-    console.log('[KV] All household data loaded from Upstash.');
-  }).catch(e => {
-    console.warn('[KV] Error loading from Upstash:', e.message);
-  });
+  loadBattlesFromDisk();
+  loadListsFromDisk();
+  loadShopsFromDisk();
+  loadHistoryFromDisk();
   setTimeout(async () => {
     for (const store of ['coles', 'woolworths']) {
       if (auth[store].loggedIn && auth[store].cookies) {
