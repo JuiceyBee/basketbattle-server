@@ -518,6 +518,11 @@ async function searchColes(query, page) {
       wasPrice: p.pricing?.was || null, isOnSpecial: !!p.pricing?.promotionType,
       unitPrice: unitPrice || null,
       unit: p.size || null, imgUrl: p.imageUris?.[0]?.uri ? assetsUrl + p.imageUris[0].uri : null, id: p.id,
+      multiBuy: p.pricing?.multiBuyPromotion ? {
+        qty:     p.pricing.multiBuyPromotion.minQuantity,
+        price:   p.pricing.multiBuyPromotion.price,
+        priceEa: p.pricing.multiBuyPromotion.price / p.pricing.multiBuyPromotion.minQuantity,
+      } : null,
       unavailable: false,
     };
   });
@@ -548,6 +553,11 @@ async function searchWoolworths(query, page) {
       unitPrice: item.CupString || null, unit: item.PackageSize || null,
       imgUrl: item.SmallImageFile ? item.SmallImageFile.replace('/small/', '/large/') : null,
       stockcode: item.Stockcode,
+      multiBuy: (item.MultiBuyQuantity && item.MultiBuyBasePrice) ? {
+        qty:     item.MultiBuyQuantity,
+        price:   item.MultiBuyBasePrice,
+        priceEa: item.MultiBuyBasePrice / item.MultiBuyQuantity,
+      } : null,
       unavailable: !item.Price || item.Price <= 0 || item.IsAvailable === false,
     }));
   });
@@ -591,6 +601,11 @@ async function getColesSpecials(page) {
       wasPrice: p.pricing?.was || null, isOnSpecial: true,
       unitPrice: unitPrice || null,
       unit: p.size || null, imgUrl: p.imageUris?.[0]?.uri ? assetsUrl + p.imageUris[0].uri : null, id: p.id,
+      multiBuy: p.pricing?.multiBuyPromotion ? {
+        qty:     p.pricing.multiBuyPromotion.minQuantity,
+        price:   p.pricing.multiBuyPromotion.price,
+        priceEa: p.pricing.multiBuyPromotion.price / p.pricing.multiBuyPromotion.minQuantity,
+      } : null,
       unavailable: false,
     };
   });
