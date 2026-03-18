@@ -1158,11 +1158,18 @@ function randomCode(len) {
 }
 
 async function isValidToken(token) {
-  if (!token) return false;
+  if (!token) {
+    console.log('[Gate] No token provided');
+    return false;
+  }
   try {
     const val = await upstashGet(`bb:token:${token}`);
+    console.log('[Gate] Token:', token.slice(0,8) + '…', '| Upstash result:', val);
     return val === 'valid';
-  } catch { return false; }
+  } catch (e) {
+    console.log('[Gate] isValidToken error:', e.message);
+    return false;
+  }
 }
 
 async function createInviteCodes(count) {
