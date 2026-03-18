@@ -3,6 +3,7 @@ const https = require("https");
 const fs = require("fs");
 
 const PORT = 3000;
+const ADMIN_KEY = process.env.BB_ADMIN_KEY || "";
 const agent = new https.Agent({ rejectUnauthorized: false });
 
 const BASE_HEADERS = {
@@ -1124,6 +1125,67 @@ async function upstashSet(key, value) {
   }
 }
 
+async function upstashDel(key) {
+  if (!UPSTASH_URL || !UPSTASH_TOKEN) return;
+  try {
+    await fetch(`${UPSTASH_URL}/del/${encodeURIComponent(key)}`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` },
+    });
+  } catch(e) {
+    console.warn("[Upstash] DEL error for", key, ":", e.message);
+  }
+}
+
+/* ============================================================
+   INVITE + ACCESS TOKEN SYSTEM
+   Upstash keys:
+     bb:invite:{CODE}  → "pending" (single-use, burned on redeem)
+     bb:token:{TOKEN}  → "valid"   (permanent, issued on redeem)
+
+   Admin creates codes via POST /admin/invite { adminKey, count }
+   App redeems via POST /redeem-invite { code } → { ok, token }
+   Every protected route checks x-bb-access header against bb:token:{TOKEN}
+   ============================================================ */
+
+function randomCode(len) {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no 0/O/1/I confusion
+  let s = '';
+  for (let i = 0; i < len; i++) s += chars[Math.floor(Math.random() * chars.length)];
+  return s;
+}
+
+async function isValidToken(token) {
+  if (!token) return false;
+  try {
+    const val = await upstashGet(`bb:token:${token}`);
+    return val === 'valid';
+  } catch { return false; }
+}
+
+async function createInviteCodes(count) {
+  const codes = [];
+  for (let i = 0; i < count; i++) {
+    const code = randomCode(8);
+    await upstashSet(`bb:invite:${code}`, 'pending');
+    codes.push(code);
+  }
+  return codes;
+}
+
+async function redeemInviteCode(code) {
+  const val = await upstashGet(`bb:invite:${code}`);
+  if (!val) return { ok: false, error: 'Invalid code' };
+  if (val === 'used') return { ok: false, error: 'Code already used' };
+  // Burn the invite code
+  await upstashSet(`bb:invite:${code}`, 'used');
+  // Issue a permanent token
+  const token = randomCode(32);
+  await upstashSet(`bb:token:${token}`, 'valid');
+  console.log('[Invite] Code', code, 'redeemed — token issued');
+  return { ok: true, token };
+}
+
 /* ============================================================
    SSE + shared list + shared shop
    ============================================================ */
@@ -1272,6 +1334,44 @@ const server = http.createServer(async (req, res) => {
   const path = parsed.pathname;
 
   if (path === "/ping") { res.writeHead(200); res.end("ok"); return; }
+
+  // ── Admin: generate invite codes ──────────────────────────────────────────
+  if (path === "/admin/invite" && req.method === "POST") {
+    const body = await parseBody(req);
+    if (!ADMIN_KEY || body.adminKey !== ADMIN_KEY) {
+      res.writeHead(403, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Forbidden" })); return;
+    }
+    const count = Math.min(Math.max(parseInt(body.count) || 1, 1), 50);
+    const codes = await createInviteCodes(count);
+    console.log('[Admin] Generated', codes.length, 'invite code(s)');
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true, codes })); return;
+  }
+
+  // ── Redeem invite code → permanent token ─────────────────────────────────
+  if (path === "/redeem-invite" && req.method === "POST") {
+    const body = await parseBody(req);
+    const code = (body.code || '').trim().toUpperCase();
+    if (!code) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: 'Invalid code' })); return;
+    }
+    const result = await redeemInviteCode(code);
+    res.writeHead(result.ok ? 200 : 400, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(result)); return;
+  }
+
+  // ── Access gate — all routes below require a valid token ──────────────────
+  // Skip check if no ADMIN_KEY is configured (dev/open mode)
+  if (ADMIN_KEY) {
+    const token = req.headers['x-bb-access'] || '';
+    const valid = await isValidToken(token);
+    if (!valid) {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Unauthorized" })); return;
+    }
+  }
 
   if (path === "/specials") {
     const page = parseInt(parsed.searchParams.get("page") || "1", 10);
