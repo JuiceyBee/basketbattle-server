@@ -1087,127 +1087,133 @@ async function addToColesCart(items) {
 }
 
 /* ============================================================
-   SSE + shared list + shared shop
+   UPSTASH REDIS — persistent storage that survives Render spin-downs.
+   Uses the Upstash REST API (fetch-based, no npm package needed).
+   Set these two env vars in your Render service:
+     UPSTASH_REDIS_REST_URL   e.g. https://xxxxx.upstash.io
+     UPSTASH_REDIS_REST_TOKEN your Upstash REST token
    ============================================================ */
-let householdLists = {};   // { code: { coles:[], woolworths:[] } }
-let householdShops = {};   // { code: { coles:[], woolworths:[] } }
-const sseClients = new Set();
-const sseClientCodes = new Map(); // client res -> householdCode
+const UPSTASH_URL   = process.env.UPSTASH_REDIS_REST_URL   || "";
+const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || "";
 
-function getList(code) {
-  if (!code) return { coles: [], woolworths: [] };
-  return householdLists[code] || { coles: [], woolworths: [] };
+async function upstashGet(key) {
+  if (!UPSTASH_URL || !UPSTASH_TOKEN) return null;
+  try {
+    const res = await fetch(`${UPSTASH_URL}/get/${encodeURIComponent(key)}`, {
+      headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` },
+    });
+    const data = await res.json();
+    if (data.result === null || data.result === undefined) return null;
+    return JSON.parse(data.result);
+  } catch(e) {
+    console.warn("[Upstash] GET error for", key, ":", e.message);
+    return null;
+  }
 }
-function setList(code, data) {
-  if (!code) return;
-  householdLists[code] = data;
-  saveListsToDisk();
-  broadcast('list-update', { code, list: data }, code);
-}
-function getShop(code) {
-  if (!code) return { coles: [], woolworths: [] };
-  return householdShops[code] || { coles: [], woolworths: [] };
-}
-function setShop(code, data) {
-  if (!code) return;
-  householdShops[code] = data;
-  saveShopsToDisk();
-  broadcast('shop-update', { code, shopList: data }, code);
+
+async function upstashSet(key, value) {
+  if (!UPSTASH_URL || !UPSTASH_TOKEN) return;
+  try {
+    await fetch(`${UPSTASH_URL}/set/${encodeURIComponent(key)}`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${UPSTASH_TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify(JSON.stringify(value)),
+    });
+  } catch(e) {
+    console.warn("[Upstash] SET error for", key, ":", e.message);
+  }
 }
 
 /* ============================================================
-   HOUSEHOLD BATTLES PERSISTENCE
+   SSE + shared list + shared shop
    ============================================================ */
-const BATTLES_FILE = "./battles.json";
-const LISTS_FILE   = "./lists.json";
-const SHOPS_FILE   = "./shops.json";
-const HISTORY_FILE = "./history.json";
-let allHouseholdBattles = {};
-let householdHistory = {}; // { code: [ { id, date, coles: {total, items}, woolworths: {total, items} } ] }
+let householdLists = {};
+let householdShops = {};
+const sseClients = new Set();
+const sseClientCodes = new Map();
 
-function loadBattlesFromDisk() {
-  try {
-    if (fs.existsSync(BATTLES_FILE)) {
-      allHouseholdBattles = JSON.parse(fs.readFileSync(BATTLES_FILE, "utf8"));
-      console.log("[Battles] Loaded", Object.keys(allHouseholdBattles).length, "household(s) from disk.");
-    }
-  } catch(e) { console.warn("[Battles] Could not load battles:", e.message); }
+// These stubs are called from old sync paths — now no-ops since we write to Upstash directly
+function saveListsToDisk() {}
+function saveShopsToDisk() {}
+
+async function getList(code) {
+  if (!code) return { coles: [], woolworths: [] };
+  const key = code.toUpperCase();
+  if (householdLists[key]) return householdLists[key];
+  const stored = await upstashGet(`bb:list:${key}`);
+  householdLists[key] = stored || { coles: [], woolworths: [] };
+  return householdLists[key];
 }
-
-function saveBattlesToDisk() {
-  try { fs.writeFileSync(BATTLES_FILE, JSON.stringify(allHouseholdBattles, null, 2)); }
-  catch(e) { console.warn("[Battles] Could not save battles:", e.message); }
-}
-
-function loadListsFromDisk() {
-  try {
-    if (fs.existsSync(LISTS_FILE)) {
-      householdLists = JSON.parse(fs.readFileSync(LISTS_FILE, "utf8"));
-      console.log("[Lists] Loaded", Object.keys(householdLists).length, "household(s) from disk.");
-    }
-  } catch(e) { console.warn("[Lists] Could not load lists:", e.message); }
-}
-
-function saveListsToDisk() {
-  try { fs.writeFileSync(LISTS_FILE, JSON.stringify(householdLists, null, 2)); }
-  catch(e) { console.warn("[Lists] Could not save lists:", e.message); }
-}
-
-function loadShopsFromDisk() {
-  try {
-    if (fs.existsSync(SHOPS_FILE)) {
-      householdShops = JSON.parse(fs.readFileSync(SHOPS_FILE, "utf8"));
-      console.log("[Shops] Loaded", Object.keys(householdShops).length, "household(s) from disk.");
-    }
-  } catch(e) { console.warn("[Shops] Could not load shops:", e.message); }
-}
-
-function saveShopsToDisk() {
-  try { fs.writeFileSync(SHOPS_FILE, JSON.stringify(householdShops, null, 2)); }
-  catch(e) { console.warn("[Shops] Could not save shops:", e.message); }
-}
-
-function loadHistoryFromDisk() {
-  try {
-    if (fs.existsSync(HISTORY_FILE)) {
-      householdHistory = JSON.parse(fs.readFileSync(HISTORY_FILE, "utf8"));
-      console.log("[History] Loaded", Object.keys(householdHistory).length, "household(s) from disk.");
-    }
-  } catch(e) { console.warn("[History] Could not load history:", e.message); }
-}
-
-function saveHistoryToDisk() {
-  try { fs.writeFileSync(HISTORY_FILE, JSON.stringify(householdHistory, null, 2)); }
-  catch(e) { console.warn("[History] Could not save history:", e.message); }
-}
-
-function getHistory(code) {
-  if (!code) return [];
-  return householdHistory[code.toUpperCase()] || [];
-}
-
-function addHistory(code, entry) {
+async function setList(code, data) {
   if (!code) return;
   const key = code.toUpperCase();
-  if (!householdHistory[key]) householdHistory[key] = [];
-  householdHistory[key].unshift(entry); // newest first
-  // Keep max 50 entries per household
-  if (householdHistory[key].length > 50) householdHistory[key] = householdHistory[key].slice(0, 50);
-  saveHistoryToDisk();
-  broadcast('history-update', { code: key, history: householdHistory[key] }, key);
+  householdLists[key] = data;
+  await upstashSet(`bb:list:${key}`, data);
+  broadcast('list-update', { code: key, list: data }, key);
 }
-
-function getBattles(code) {
-  if (!code) return [];
-  return allHouseholdBattles[code.toUpperCase()] || [];
+async function getShop(code) {
+  if (!code) return { coles: [], woolworths: [] };
+  const key = code.toUpperCase();
+  if (householdShops[key]) return householdShops[key];
+  const stored = await upstashGet(`bb:shop:${key}`);
+  householdShops[key] = stored || { coles: [], woolworths: [] };
+  return householdShops[key];
 }
-
-function setBattles(code, groups) {
+async function setShop(code, data) {
   if (!code) return;
-  allHouseholdBattles[code.toUpperCase()] = groups;
-  saveBattlesToDisk();
-  // broadcast to all clients with this household code
-  broadcast('battles-update', { code: code.toUpperCase(), groups });
+  const key = code.toUpperCase();
+  householdShops[key] = data;
+  await upstashSet(`bb:shop:${key}`, data);
+  broadcast('shop-update', { code: key, shopList: data }, key);
+}
+
+/* ============================================================
+   HOUSEHOLD BATTLES + HISTORY PERSISTENCE — Upstash Redis
+   ============================================================ */
+let allHouseholdBattles = {};
+let householdHistory    = {};
+
+// No-ops — startup sequence calls these but Upstash loads on demand
+function loadBattlesFromDisk() { if (!UPSTASH_URL) console.warn("[Upstash] No UPSTASH_REDIS_REST_URL set — data will not persist across restarts!"); }
+function loadListsFromDisk()   {}
+function loadShopsFromDisk()   {}
+function loadHistoryFromDisk() {}
+
+async function getHistory(code) {
+  if (!code) return [];
+  const key = code.toUpperCase();
+  if (householdHistory[key]) return householdHistory[key];
+  const stored = await upstashGet(`bb:history:${key}`);
+  householdHistory[key] = stored || [];
+  return householdHistory[key];
+}
+
+async function addHistory(code, entry) {
+  if (!code) return;
+  const key = code.toUpperCase();
+  const existing = await getHistory(key);
+  existing.unshift(entry);
+  if (existing.length > 50) existing.length = 50;
+  householdHistory[key] = existing;
+  await upstashSet(`bb:history:${key}`, existing);
+  broadcast('history-update', { code: key, history: existing }, key);
+}
+
+async function getBattles(code) {
+  if (!code) return [];
+  const key = code.toUpperCase();
+  if (allHouseholdBattles[key] !== undefined) return allHouseholdBattles[key];
+  const stored = await upstashGet(`bb:battles:${key}`);
+  allHouseholdBattles[key] = stored || [];
+  return allHouseholdBattles[key];
+}
+
+async function setBattles(code, groups) {
+  if (!code) return;
+  const key = code.toUpperCase();
+  allHouseholdBattles[key] = groups;
+  await upstashSet(`bb:battles:${key}`, groups);
+  broadcast('battles-update', { code: key, groups });
 }
 
 function broadcast(event, data, targetCode) {
@@ -1279,12 +1285,12 @@ const server = http.createServer(async (req, res) => {
     if (!code) { res.writeHead(400, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "No household code" })); return; }
     if (req.method === "GET") {
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ groups: getBattles(code) }));
+      res.end(JSON.stringify({ groups: await getBattles(code) }));
       return;
     }
     if (req.method === "POST") {
       const body = await parseBody(req);
-      setBattles(code, body.groups || []);
+      await setBattles(code, body.groups || []);
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true }));
       return;
@@ -1295,12 +1301,12 @@ const server = http.createServer(async (req, res) => {
     const code = parsed.searchParams.get("code") || "";
     if (req.method === "GET") {
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(getList(code)));
+      res.end(JSON.stringify(await getList(code)));
       return;
     }
     if (req.method === "POST") {
       const body = await parseBody(req);
-      if (code) setList(code, body);
+      if (code) await setList(code, body);
       res.writeHead(200); res.end("ok");
       return;
     }
@@ -1310,12 +1316,12 @@ const server = http.createServer(async (req, res) => {
     const code = parsed.searchParams.get("code") || "";
     if (req.method === "GET") {
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(getShop(code)));
+      res.end(JSON.stringify(await getShop(code)));
       return;
     }
     if (req.method === "POST") {
       const body = await parseBody(req);
-      if (code) setShop(code, body);
+      if (code) await setShop(code, body);
       res.writeHead(200); res.end("ok");
       return;
     }
@@ -1326,12 +1332,12 @@ const server = http.createServer(async (req, res) => {
     if (!code) { res.writeHead(400); res.end("No code"); return; }
     if (req.method === "GET") {
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ history: getHistory(code) }));
+      res.end(JSON.stringify({ history: await getHistory(code) }));
       return;
     }
     if (req.method === "POST") {
       const body = await parseBody(req);
-      if (body.entry) addHistory(code, body.entry);
+      if (body.entry) await addHistory(code, body.entry);
       res.writeHead(200); res.end("ok");
       return;
     }
