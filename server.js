@@ -1107,8 +1107,13 @@ async function upstashGet(key) {
     });
     const data = await res.json();
     if (data.result === null || data.result === undefined) return null;
-    // Upstash returns the raw stored string — parse once if it looks like JSON
-    try { return JSON.parse(data.result); } catch { return data.result; }
+    // Parse once — if result is still a string (double-encoded legacy data), parse again
+    let parsed;
+    try { parsed = JSON.parse(data.result); } catch { return data.result; }
+    if (typeof parsed === 'string') {
+      try { parsed = JSON.parse(parsed); } catch {}
+    }
+    return parsed;
   } catch(e) {
     console.warn("[Upstash] GET error for", key, ":", e.message);
     return null;
@@ -1118,7 +1123,7 @@ async function upstashGet(key) {
 async function upstashSet(key, value) {
   if (!UPSTASH_URL || !UPSTASH_TOKEN) return;
   try {
-    // Store as a single JSON string (not double-encoded)
+    // Store as single JSON string — not double encoded
     await fetch(`${UPSTASH_URL}/set/${encodeURIComponent(key)}`, {
       method: "POST",
       headers: { Authorization: `Bearer ${UPSTASH_TOKEN}`, "Content-Type": "application/json" },
