@@ -1857,6 +1857,356 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (path === "/admin-panel" && req.method === "GET") {
+    const urlKey = parsed.searchParams.get("key") || "";
+    if (!ADMIN_KEY || urlKey !== ADMIN_KEY) {
+      res.writeHead(403, { "Content-Type": "text/html" });
+      res.end(`<html><body style="background:#0a0c10;color:#ef4444;font-family:monospace;padding:40px;text-align:center"><h2>403 Forbidden</h2></body></html>`);
+      return;
+    }
+    const adminHtml = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="BB Admin">
+<meta name="theme-color" content="#0a0c10">
+<title>BasketBattle Admin</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@700;800&display=swap');
+  :root {
+    --bg:#0a0c10;--surface:#111318;--surface2:#181b22;--border:#1e2230;
+    --gold:#f59e0b;--gold2:#fbbf24;--red:#ef4444;--green:#22c55e;
+    --muted:#4b5563;--sub:#6b7280;--text:#f1f5f9;--text2:#94a3b8;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--text);font-family:'DM Mono',monospace;min-height:100vh;padding-bottom:env(safe-area-inset-bottom)}
+  #offline-banner{display:none;position:fixed;top:0;left:0;right:0;background:var(--red);color:#fff;text-align:center;padding:10px;font-size:13px;font-weight:500;z-index:9999;letter-spacing:.05em}
+  body.offline #offline-banner{display:block}
+  body.offline .app{pointer-events:none;opacity:.4;filter:grayscale(1)}
+  .header{border-bottom:1px solid var(--border);padding:20px 24px;padding-top:calc(20px + env(safe-area-inset-top));display:flex;align-items:center;gap:14px;position:sticky;top:0;background:var(--bg);z-index:10}
+  .header-logo{font-size:26px}
+  .header-title{font-family:'Syne',sans-serif;font-size:20px;font-weight:800;color:var(--gold);letter-spacing:-.5px}
+  .header-sub{font-size:11px;color:var(--muted);margin-top:2px}
+  .online-dot{width:8px;height:8px;border-radius:50%;background:var(--green);margin-left:auto;box-shadow:0 0 8px var(--green);flex-shrink:0}
+  .online-dot.offline{background:var(--red);box-shadow:0 0 8px var(--red)}
+  .app{max-width:600px;margin:0 auto;padding:24px 16px 60px}
+  .section{background:var(--surface);border:1px solid var(--border);border-radius:14px;margin-bottom:20px;overflow:hidden}
+  .section-header{padding:14px 18px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px}
+  .section-title{font-family:'Syne',sans-serif;font-size:13px;font-weight:700;color:var(--text);text-transform:uppercase;letter-spacing:1px}
+  .section-body{padding:16px 18px}
+  label{display:block;font-size:11px;color:var(--sub);margin-bottom:6px;letter-spacing:.05em;text-transform:uppercase}
+  input[type="text"]{width:100%;background:var(--surface2);border:1.5px solid var(--border);border-radius:8px;padding:11px 14px;color:var(--text);font-family:'DM Mono',monospace;font-size:14px;outline:none;transition:border-color .15s}
+  input:focus{border-color:var(--gold)}
+  .btn{display:inline-flex;align-items:center;gap:6px;padding:10px 18px;border-radius:8px;border:none;font-family:'DM Mono',monospace;font-size:13px;font-weight:500;cursor:pointer;transition:opacity .15s,transform .1s;white-space:nowrap}
+  .btn:active{transform:scale(.97)}
+  .btn:disabled{opacity:.4;cursor:not-allowed}
+  .btn-gold{background:var(--gold);color:#1a1100}
+  .btn-gold:hover:not(:disabled){background:var(--gold2)}
+  .btn-ghost{background:transparent;border:1.5px solid var(--border);color:var(--text2)}
+  .btn-ghost:hover:not(:disabled){border-color:var(--gold);color:var(--gold)}
+  .btn-red{background:transparent;border:1.5px solid #3f1212;color:#f87171;font-size:12px;padding:6px 12px}
+  .btn-red:hover:not(:disabled){background:#3f1212}
+  .btn-sm{padding:6px 12px;font-size:12px}
+  #toast{position:fixed;bottom:calc(28px + env(safe-area-inset-bottom));left:50%;transform:translateX(-50%) translateY(20px);background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:11px 20px;font-size:13px;color:var(--text);opacity:0;transition:opacity .2s,transform .2s;pointer-events:none;white-space:nowrap;z-index:1000}
+  #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+  #toast.success{border-color:var(--green);color:var(--green)}
+  #toast.error{border-color:var(--red);color:var(--red)}
+  .name-slots{display:flex;flex-direction:column;gap:8px}
+  .name-slot{display:flex;align-items:center;gap:8px}
+  .name-slot input{flex:1;margin:0}
+  .slot-remove{background:none;border:none;color:var(--muted);font-size:18px;cursor:pointer;padding:4px 6px;line-height:1;border-radius:6px;transition:color .15s;flex-shrink:0}
+  .slot-remove:hover{color:var(--red)}
+  .users-list{display:flex;flex-direction:column;gap:8px}
+  .user-row{background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:12px 14px;display:flex;align-items:center;gap:12px;animation:fadeIn .2s ease}
+  @keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+  .user-avatar{width:34px;height:34px;border-radius:50%;background:var(--border);display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0}
+  .user-info{flex:1;min-width:0}
+  .user-name{font-size:14px;font-weight:500;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .user-token{font-size:10px;color:var(--muted);margin-top:2px;letter-spacing:1px}
+  .user-date{font-size:10px;color:var(--muted);margin-top:1px}
+  .user-status{font-size:10px;font-weight:700;padding:3px 8px;border-radius:20px;letter-spacing:.5px;flex-shrink:0}
+  .user-status.active{background:#14532d;color:#4ade80}
+  .user-status.revoked{background:#3f1212;color:#f87171}
+  .user-actions{display:flex;gap:6px;flex-shrink:0}
+  .pending-list{display:flex;flex-direction:column;gap:6px}
+  .pending-row{background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:10px 14px;display:flex;align-items:center;gap:10px}
+  .pending-code{font-size:14px;letter-spacing:2px;color:var(--gold)}
+  .pending-date{font-size:10px;color:var(--muted)}
+  .empty{text-align:center;padding:28px 16px;color:var(--muted);font-size:12px;line-height:1.8}
+  .spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--border);border-top-color:var(--gold);border-radius:50%;animation:spin .6s linear infinite;vertical-align:middle}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .name-edit{background:var(--surface);border:1.5px solid var(--gold);border-radius:6px;padding:4px 8px;color:var(--text);font-family:'DM Mono',monospace;font-size:13px;width:140px;outline:none}
+  .install-banner{background:#1a1d27;border:1px solid var(--border);border-radius:10px;padding:12px 16px;font-size:12px;color:var(--text2);margin-bottom:20px;line-height:1.7;display:none}
+  .install-banner.show{display:block}
+</style>
+</head>
+<body>
+<div id="offline-banner">⚠ No internet — changes disabled</div>
+<div class="header">
+  <div class="header-logo">🛒</div>
+  <div><div class="header-title">BB Admin</div><div class="header-sub">Invite management</div></div>
+  <div class="online-dot" id="online-dot"></div>
+</div>
+<div class="app">
+  <div class="install-banner" id="install-banner">
+    📱 <strong>Add to Home Screen</strong> to use as an app.<br>
+    Safari: tap <strong>Share → Add to Home Screen</strong>
+  </div>
+  <div class="section">
+    <div class="section-header"><span>🎟</span><span class="section-title">Generate Invite Codes</span></div>
+    <div class="section-body">
+      <div id="name-slots"></div>
+      <div style="display:flex;gap:8px;margin-top:12px">
+        <button class="btn btn-ghost" onclick="addSlot()">+ Add person</button>
+        <button class="btn btn-gold" onclick="generateCodes()" id="gen-btn">Generate</button>
+      </div>
+      <div id="gen-result"></div>
+    </div>
+  </div>
+  <div class="section">
+    <div class="section-header"><span>👥</span><span class="section-title">Active Users</span><span id="user-count" style="margin-left:auto;font-size:11px;color:var(--muted)"></span></div>
+    <div class="section-body"><div id="users-list" class="users-list"><div class="empty">Loading…</div></div></div>
+  </div>
+  <div class="section">
+    <div class="section-header"><span>⏳</span><span class="section-title">Pending Codes</span><span id="pending-count" style="margin-left:auto;font-size:11px;color:var(--muted)"></span></div>
+    <div class="section-body"><div id="pending-list" class="pending-list"><div class="empty">No pending codes</div></div></div>
+  </div>
+</div>
+<div id="toast"></div>
+<script>
+const ADMIN_KEY  = ${JSON.stringify(ADMIN_KEY)};
+const SERVER_URL = ${JSON.stringify('https://' + req.headers.host)};
+
+const LS_USERS   = 'bb_admin_users';
+const LS_PENDING = 'bb_admin_pending';
+let users   = JSON.parse(localStorage.getItem(LS_USERS)   || '[]');
+let pending = JSON.parse(localStorage.getItem(LS_PENDING) || '[]');
+
+function save() {
+  localStorage.setItem(LS_USERS,   JSON.stringify(users));
+  localStorage.setItem(LS_PENDING, JSON.stringify(pending));
+}
+function toast(msg, type='') {
+  const el = document.getElementById('toast');
+  el.textContent = msg; el.className = 'show ' + type;
+  clearTimeout(el._t); el._t = setTimeout(() => { el.className=''; }, 2800);
+}
+function fmtDate(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return d.toLocaleDateString('en-AU',{day:'numeric',month:'short',year:'numeric'})
+    + ' ' + d.toLocaleTimeString('en-AU',{hour:'2-digit',minute:'2-digit'});
+}
+function isOnline() { return navigator.onLine; }
+
+function updateOnlineStatus() {
+  const online = navigator.onLine;
+  document.body.classList.toggle('offline', !online);
+  document.getElementById('online-dot').classList.toggle('offline', !online);
+}
+window.addEventListener('online',  updateOnlineStatus);
+window.addEventListener('offline', updateOnlineStatus);
+updateOnlineStatus();
+
+// Show install banner if not already installed as PWA
+if (!window.navigator.standalone && !window.matchMedia('(display-mode: standalone)').matches) {
+  document.getElementById('install-banner').classList.add('show');
+}
+
+// ── Name slots ────────────────────────────────────────────────
+let slots = [{id:1,name:''}]; let slotId = 1;
+function renderSlots() {
+  const el = document.getElementById('name-slots');
+  el.innerHTML = '<div class="name-slots">' + slots.map(s => \`
+    <div class="name-slot">
+      <input type="text" placeholder="Person's name (e.g. Mum)"
+        value="\${s.name}"
+        oninput="updateSlot(\${s.id},this.value)"
+        onkeydown="if(event.key==='Enter'){event.preventDefault();addSlot();}">
+      \${slots.length > 1 ? \`<button class="slot-remove" onclick="removeSlot(\${s.id})">✕</button>\` : ''}
+    </div>\`).join('') + '</div>';
+  const inputs = el.querySelectorAll('input');
+  const last = inputs[inputs.length-1];
+  if (last && !last.value) last.focus();
+}
+function addSlot() { slotId++; slots.push({id:slotId,name:''}); renderSlots(); }
+function removeSlot(id) { if(slots.length<=1)return; slots=slots.filter(s=>s.id!==id); renderSlots(); }
+function updateSlot(id,val) { const s=slots.find(s=>s.id===id); if(s) s.name=val; }
+
+// ── Generate ──────────────────────────────────────────────────
+async function generateCodes() {
+  if (!isOnline()) { toast('No internet connection','error'); return; }
+  const names = slots.map(s => s.name.trim());
+  const count = names.length;
+  const btn = document.getElementById('gen-btn');
+  btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Generating…';
+  try {
+    const res = await fetch(SERVER_URL+'/admin/invite', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({adminKey:ADMIN_KEY, count}),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) throw new Error(data.error || 'Server error');
+    const now = new Date().toISOString();
+    data.codes.forEach((code,i) => pending.unshift({code, name:names[i]||'', createdAt:now}));
+    save();
+    document.getElementById('gen-result').innerHTML = '<div style="margin-top:14px;display:flex;flex-direction:column;gap:8px;">'
+      + data.codes.map((c,i) => \`<div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:10px 14px;display:flex;align-items:center;gap:10px;">
+          <div style="flex:1"><div style="font-size:11px;color:var(--sub);margin-bottom:3px;">\${names[i]||'Unnamed'}</div>
+          <div style="font-size:15px;letter-spacing:2px;color:var(--gold);">\${c}</div></div>
+          <button class="btn btn-ghost btn-sm" onclick="copyText(this,'\${c}')">Copy</button>
+        </div>\`).join('') + '</div>';
+    slots=[{id:1,name:''}]; slotId=1; renderSlots();
+    toast(data.codes.length + ' code' + (data.codes.length>1?'s':'') + ' generated','success');
+    renderPending();
+  } catch(e) { toast('Error: '+e.message,'error'); }
+  finally { btn.disabled=false; btn.textContent='Generate'; }
+}
+
+function copyText(btn, text) {
+  navigator.clipboard.writeText(text).then(() => {
+    btn.textContent='✓ Copied'; setTimeout(()=>{btn.textContent='Copy';},1500);
+  }).catch(() => {
+    const el=document.createElement('textarea'); el.value=text;
+    document.body.appendChild(el); el.select(); document.execCommand('copy');
+    document.body.removeChild(el);
+    btn.textContent='✓ Copied'; setTimeout(()=>{btn.textContent='Copy';},1500);
+  });
+}
+
+// ── Revoke ────────────────────────────────────────────────────
+async function revokeUser(token) {
+  if (!isOnline()) { toast('No internet connection','error'); return; }
+  if (!confirm('Revoke access? They will be locked out immediately.')) return;
+  try {
+    await fetch(SERVER_URL+'/admin/revoke', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({adminKey:ADMIN_KEY, token}),
+    });
+    const idx = users.findIndex(u=>u.token===token);
+    if (idx>=0) { users[idx].active=false; users[idx].revokedAt=new Date().toISOString(); save(); }
+    toast('Access revoked','success'); renderUsers();
+  } catch(e) { toast('Error: '+e.message,'error'); }
+}
+
+async function restoreUser(token) {
+  if (!isOnline()) { toast('No internet connection','error'); return; }
+  try {
+    await fetch(SERVER_URL+'/admin/restore', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({adminKey:ADMIN_KEY, token}),
+    });
+    const idx = users.findIndex(u=>u.token===token);
+    if (idx>=0) { users[idx].active=true; delete users[idx].revokedAt; save(); }
+    toast('Access restored','success'); renderUsers();
+  } catch(e) { toast('Error: '+e.message,'error'); }
+}
+
+function deletePending(code) {
+  pending=pending.filter(p=>p.code!==code); save(); renderPending();
+  toast('Pending code removed','');
+}
+
+function startRename(token) {
+  const row = document.querySelector('[data-token="'+token+'"]');
+  if (!row) return;
+  const nameEl = row.querySelector('.user-name');
+  const current = nameEl.textContent;
+  const input = document.createElement('input');
+  input.className='name-edit'; input.value=current;
+  nameEl.replaceWith(input); input.focus(); input.select();
+  function commit() {
+    const trimmed = input.value.trim() || current;
+    const idx = users.findIndex(u=>u.token===token);
+    if (idx>=0) { users[idx].name=trimmed; save(); }
+    renderUsers();
+  }
+  input.addEventListener('blur', commit);
+  input.addEventListener('keydown', e=>{ if(e.key==='Enter'){e.preventDefault();commit();} });
+}
+
+// ── Render ────────────────────────────────────────────────────
+function renderUsers() {
+  const el = document.getElementById('users-list');
+  const count = document.getElementById('user-count');
+  if (!users.length) {
+    el.innerHTML='<div class="empty">No users yet.<br>Codes appear here when redeemed.</div>';
+    count.textContent=''; return;
+  }
+  const active = users.filter(u=>u.active!==false).length;
+  count.textContent = active+' active · '+users.length+' total';
+  el.innerHTML = users.map(u => \`
+    <div class="user-row" data-token="\${u.token}">
+      <div class="user-avatar">\${(u.name||'?')[0].toUpperCase()}</div>
+      <div class="user-info">
+        <div class="user-name">\${u.name||'Unnamed user'}</div>
+        <div class="user-token">TOKEN: \${u.token.slice(0,8)}…</div>
+        <div class="user-date">Joined \${fmtDate(u.redeemedAt)}</div>
+      </div>
+      <span class="user-status \${u.active!==false?'active':'revoked'}">\${u.active!==false?'ACTIVE':'REVOKED'}</span>
+      <div class="user-actions">
+        <button class="btn btn-ghost btn-sm" onclick="startRename('\${u.token}')" title="Rename">✏️</button>
+        \${u.active!==false
+          ? \`<button class="btn btn-red" onclick="revokeUser('\${u.token}')">Revoke</button>\`
+          : \`<button class="btn btn-ghost btn-sm" onclick="restoreUser('\${u.token}')">Restore</button>\`}
+      </div>
+    </div>\`).join('');
+}
+
+function renderPending() {
+  const el = document.getElementById('pending-list');
+  const count = document.getElementById('pending-count');
+  if (!pending.length) {
+    el.innerHTML='<div class="empty">No pending codes</div>';
+    count.textContent=''; return;
+  }
+  count.textContent = pending.length+' unused';
+  el.innerHTML = pending.map(p => \`
+    <div class="pending-row">
+      <div style="flex:1;min-width:0">
+        \${p.name ? \`<div style="font-size:11px;color:var(--sub);margin-bottom:2px;">\${p.name}</div>\` : ''}
+        <div class="pending-code">\${p.code}</div>
+        <div class="pending-date">\${fmtDate(p.createdAt)}</div>
+      </div>
+      <button class="btn btn-ghost btn-sm" onclick="copyText(this,'\${p.code}')">Copy</button>
+      <button class="btn btn-red" onclick="deletePending('\${p.code}')">Delete</button>
+    </div>\`).join('');
+}
+
+async function checkRedeemed() {
+  if (!isOnline() || !pending.length) return;
+  try {
+    for (const p of [...pending]) {
+      const res = await fetch(SERVER_URL+'/admin/check-invite', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({adminKey:ADMIN_KEY, code:p.code}),
+      });
+      if (!res.ok) continue;
+      const data = await res.json();
+      if (data.status==='used' && data.token) {
+        const assignedName = p.name || '';
+        pending = pending.filter(x=>x.code!==p.code);
+        users.unshift({name:assignedName||'New user',token:data.token,redeemedAt:new Date().toISOString(),active:true,sourceCode:p.code});
+        save();
+        toast((assignedName||'Someone')+' just joined!','success');
+      }
+    }
+    renderUsers(); renderPending();
+  } catch {}
+}
+
+setInterval(checkRedeemed, 30000);
+renderSlots(); renderUsers(); renderPending(); checkRedeemed();
+</script>
+</body></html>`;
+    res.writeHead(200, { "Content-Type": "text/html" });
+    res.end(adminHtml);
+    return;
+  }
+
   res.writeHead(404); res.end();
 });
 
