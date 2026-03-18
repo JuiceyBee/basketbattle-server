@@ -1216,6 +1216,27 @@ async function setBattles(code, groups) {
   broadcast('battles-update', { code: key, groups });
 }
 
+// ── Shared cart ───────────────────────────────────────────────────────────────
+// Mirrors the app's cart shape: { createdAt, items: [...] }
+// Stored per household so both users see the same cart state.
+let householdCarts = {};
+
+async function getCart(code) {
+  if (!code) return null;
+  const key = code.toUpperCase();
+  if (householdCarts[key] !== undefined) return householdCarts[key];
+  const stored = await upstashGet(`bb:cart:${key}`);
+  householdCarts[key] = stored || null;
+  return householdCarts[key];
+}
+
+async function setCart(code, cart) {
+  if (!code) return;
+  const key = code.toUpperCase();
+  householdCarts[key] = cart;
+  await upstashSet(`bb:cart:${key}`, cart);
+}
+
 function broadcast(event, data, targetCode) {
   const msg = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
   for (const client of sseClients) {
@@ -1612,6 +1633,25 @@ const server = http.createServer(async (req, res) => {
     res.end(JSON.stringify({ done: !!(rs && rs.used) }));
     return;
   }
+  // ── Shared cart state (for household real-time sync) ──────────────────────
+  if (path === "/cart") {
+    const code = parsed.searchParams.get("code") || "";
+    if (!code) { res.writeHead(400, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "No code" })); return; }
+    if (req.method === "GET") {
+      const cart = await getCart(code);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ cart }));
+      return;
+    }
+    if (req.method === "POST") {
+      const body = await parseBody(req);
+      await setCart(code, body.cart || null);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true }));
+      return;
+    }
+  }
+
   if (path === "/cart/add" && req.method === "POST") {
     const body = await parseBody(req);
     const store = body.store;
