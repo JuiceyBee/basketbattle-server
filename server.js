@@ -2,6 +2,7 @@ const http = require("http");
 const https = require("https");
 const fs = require("fs");
 
+// v2 — invite/access system + Upstash persistence
 const PORT = 3000;
 const ADMIN_KEY = process.env.BB_ADMIN_KEY || "";
 const agent = new https.Agent({ rejectUnauthorized: false });
