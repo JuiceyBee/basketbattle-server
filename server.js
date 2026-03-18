@@ -1182,6 +1182,8 @@ async function redeemInviteCode(code) {
   // Issue a permanent token
   const token = randomCode(32);
   await upstashSet(`bb:token:${token}`, 'valid');
+  // Store token against code so admin page can discover newly redeemed users
+  await upstashSet(`bb:invite:${code}:token`, token);
   console.log('[Invite] Code', code, 'redeemed — token issued');
   return { ok: true, token };
 }
@@ -1347,6 +1349,53 @@ const server = http.createServer(async (req, res) => {
     console.log('[Admin] Generated', codes.length, 'invite code(s)');
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ ok: true, codes })); return;
+  }
+
+  // ── Admin: check if an invite code has been redeemed ─────────────────────
+  if (path === "/admin/check-invite" && req.method === "POST") {
+    const body = await parseBody(req);
+    if (!ADMIN_KEY || body.adminKey !== ADMIN_KEY) {
+      res.writeHead(403, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Forbidden" })); return;
+    }
+    const code = (body.code || '').trim().toUpperCase();
+    const val  = await upstashGet(`bb:invite:${code}`);
+    // If used, also return the token that was issued for it
+    const token = val === 'used' ? await upstashGet(`bb:invite:${code}:token`) : null;
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ status: val || 'unknown', token: token || null })); return;
+  }
+
+  // ── Admin: revoke a permanent token ──────────────────────────────────────
+  if (path === "/admin/revoke" && req.method === "POST") {
+    const body = await parseBody(req);
+    if (!ADMIN_KEY || body.adminKey !== ADMIN_KEY) {
+      res.writeHead(403, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Forbidden" })); return;
+    }
+    const token = (body.token || '').trim();
+    if (token) {
+      await upstashDel(`bb:token:${token}`);
+      console.log('[Admin] Revoked token', token.slice(0, 8) + '…');
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true })); return;
+  }
+
+  // ── Admin: restore a revoked token ───────────────────────────────────────
+  if (path === "/admin/restore" && req.method === "POST") {
+    const body = await parseBody(req);
+    if (!ADMIN_KEY || body.adminKey !== ADMIN_KEY) {
+      res.writeHead(403, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Forbidden" })); return;
+    }
+    const token = (body.token || '').trim();
+    if (token) {
+      await upstashSet(`bb:token:${token}`, 'valid');
+      console.log('[Admin] Restored token', token.slice(0, 8) + '…');
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true })); return;
   }
 
   // ── Redeem invite code → permanent token ─────────────────────────────────
