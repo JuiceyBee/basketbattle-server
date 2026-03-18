@@ -5,6 +5,7 @@ const fs = require("fs");
 // v2 — invite/access system + Upstash persistence
 const PORT = 3000;
 const ADMIN_KEY = process.env.BB_ADMIN_KEY || "";
+console.log('[Startup] ADMIN_KEY set:', !!ADMIN_KEY, '| UPSTASH set:', !!process.env.UPSTASH_REDIS_REST_URL);
 const agent = new https.Agent({ rejectUnauthorized: false });
 
 const BASE_HEADERS = {
