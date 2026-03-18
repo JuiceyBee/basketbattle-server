@@ -1301,6 +1301,21 @@ async function setCart(code, cart) {
   await upstashSet(`bb:cart:${key}`, cart);
 }
 
+// ── Feedback ──────────────────────────────────────────────────────────────────
+// Stored as a single list under bb:feedback, newest first, capped at 200.
+
+async function getFeedback() {
+  const stored = await upstashGet('bb:feedback');
+  return stored || [];
+}
+
+async function addFeedback(entry) {
+  const existing = await getFeedback();
+  existing.unshift(entry);
+  if (existing.length > 200) existing.length = 200;
+  await upstashSet('bb:feedback', existing);
+}
+
 function broadcast(event, data, targetCode) {
   const msg = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
   for (const client of sseClients) {
@@ -1394,6 +1409,32 @@ const server = http.createServer(async (req, res) => {
       await upstashSet(`bb:token:${token}`, 'valid');
       console.log('[Admin] Restored token', token.slice(0, 8) + '…');
     }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true })); return;
+  }
+
+  // ── Admin: get all feedback ───────────────────────────────────────────────
+  if (path === "/admin/feedback" && req.method === "POST") {
+    const body = await parseBody(req);
+    if (!ADMIN_KEY || body.adminKey !== ADMIN_KEY) {
+      res.writeHead(403, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Forbidden" })); return;
+    }
+    const feedback = await getFeedback();
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true, feedback })); return;
+  }
+
+  // ── Admin: delete a feedback entry ───────────────────────────────────────
+  if (path === "/admin/feedback/delete" && req.method === "POST") {
+    const body = await parseBody(req);
+    if (!ADMIN_KEY || body.adminKey !== ADMIN_KEY) {
+      res.writeHead(403, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Forbidden" })); return;
+    }
+    const existing = await getFeedback();
+    const filtered = existing.filter(f => f.id !== body.id);
+    await upstashSet('bb:feedback', filtered);
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ ok: true })); return;
   }
@@ -1527,6 +1568,14 @@ const server = http.createServer(async (req, res) => {
   <div class="section">
     <div class="section-header"><span>⏳</span><span class="section-title">Pending Codes</span><span id="pending-count" style="margin-left:auto;font-size:11px;color:var(--muted)"></span></div>
     <div class="section-body"><div id="pending-list" class="pending-list"><div class="empty">No pending codes</div></div></div>
+  </div>
+  <div class="section">
+    <div class="section-header">
+      <span>💬</span><span class="section-title">Feedback</span>
+      <span id="feedback-count" style="margin-left:auto;font-size:11px;color:var(--muted)"></span>
+      <button class="btn btn-ghost btn-sm" style="margin-left:8px" onclick="loadFeedback()">Refresh</button>
+    </div>
+    <div class="section-body"><div id="feedback-list"><div class="empty">Loading…</div></div></div>
   </div>
 </div>
 <div id="toast"></div>
@@ -1753,7 +1802,60 @@ async function checkRedeemed() {
 }
 
 setInterval(checkRedeemed, 30000);
-renderSlots(); renderUsers(); renderPending(); checkRedeemed();
+
+// ── Feedback ──────────────────────────────────────────────────
+async function loadFeedback() {
+  if (!isOnline()) return;
+  const el    = document.getElementById('feedback-list');
+  const count = document.getElementById('feedback-count');
+  el.innerHTML = '<div class="empty"><span class="spinner"></span></div>';
+  try {
+    const res = await fetch(SERVER_URL + '/admin/feedback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ adminKey: ADMIN_KEY }),
+    });
+    if (!res.ok) throw new Error('Server error');
+    const data = await res.json();
+    const items = data.feedback || [];
+    count.textContent = items.length ? items.length + ' item' + (items.length !== 1 ? 's' : '') : '';
+    if (!items.length) {
+      el.innerHTML = '<div class="empty">No feedback yet</div>';
+      return;
+    }
+    el.innerHTML = items.map(f => \`
+      <div style="background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:12px 14px;margin-bottom:8px;animation:fadeIn .2s ease">
+        <div style="font-size:13px;color:var(--text);line-height:1.6;margin-bottom:8px;">\${f.message.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</div>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+          <div>
+            <span style="font-size:10px;color:var(--muted);">\${f.householdCode || '—'}</span>
+            <span style="font-size:10px;color:var(--muted);margin-left:10px;">\${fmtDate(f.submittedAt)}</span>
+          </div>
+          <button class="btn btn-red" onclick="deleteFeedback(\${f.id})">Delete</button>
+        </div>
+      </div>\`).join('');
+  } catch(e) {
+    el.innerHTML = '<div class="empty">Could not load feedback</div>';
+    count.textContent = '';
+  }
+}
+
+async function deleteFeedback(id) {
+  if (!isOnline()) { toast('No internet connection', 'error'); return; }
+  try {
+    await fetch(SERVER_URL + '/admin/feedback/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ adminKey: ADMIN_KEY, id }),
+    });
+    toast('Deleted', '');
+    loadFeedback();
+  } catch(e) {
+    toast('Error: ' + e.message, 'error');
+  }
+}
+
+renderSlots(); renderUsers(); renderPending(); checkRedeemed(); loadFeedback();
 </script>
 </body></html>`;
     res.writeHead(200, { "Content-Type": "text/html" });
@@ -2149,6 +2251,21 @@ renderSlots(); renderUsers(); renderPending(); checkRedeemed();
       res.end(JSON.stringify({ ok: true }));
       return;
     }
+  }
+
+  if (path === "/feedback" && req.method === "POST") {
+    const body = await parseBody(req);
+    const message = (body.message || '').trim();
+    if (!message) { res.writeHead(400, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "No message" })); return; }
+    await addFeedback({
+      id: Date.now(),
+      message,
+      householdCode: body.householdCode || 'unknown',
+      submittedAt: body.submittedAt || new Date().toISOString(),
+    });
+    console.log('[Feedback] New from', body.householdCode || 'unknown');
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true })); return;
   }
 
   if (path === "/cart/add" && req.method === "POST") {
