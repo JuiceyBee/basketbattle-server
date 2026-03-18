@@ -1107,7 +1107,8 @@ async function upstashGet(key) {
     });
     const data = await res.json();
     if (data.result === null || data.result === undefined) return null;
-    return JSON.parse(data.result);
+    // Upstash returns the raw stored string — parse once if it looks like JSON
+    try { return JSON.parse(data.result); } catch { return data.result; }
   } catch(e) {
     console.warn("[Upstash] GET error for", key, ":", e.message);
     return null;
@@ -1117,6 +1118,7 @@ async function upstashGet(key) {
 async function upstashSet(key, value) {
   if (!UPSTASH_URL || !UPSTASH_TOKEN) return;
   try {
+    // Store as a single JSON string (not double-encoded)
     await fetch(`${UPSTASH_URL}/set/${encodeURIComponent(key)}`, {
       method: "POST",
       headers: { Authorization: `Bearer ${UPSTASH_TOKEN}`, "Content-Type": "application/json" },
@@ -1165,7 +1167,7 @@ async function isValidToken(token) {
   try {
     const val = await upstashGet(`bb:token:${token}`);
     console.log('[Gate] Token:', token.slice(0,8) + '…', '| Upstash result:', val);
-    return val === 'valid';
+    return val === 'valid' || val === '"valid"';
   } catch (e) {
     console.log('[Gate] isValidToken error:', e.message);
     return false;
