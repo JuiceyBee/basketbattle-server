@@ -1330,6 +1330,151 @@ async function addFeedback(entry) {
   existing.unshift(entry);
   if (existing.length > 200) existing.length = 200;
   await upstashSet('bb:feedback', existing);
+  // Fire push notification to all registered admin subscriptions
+  sendPushToAll(`New feedback from ${entry.householdCode || 'unknown'}`, entry.message).catch(() => {});
+}
+
+// ── Web Push (VAPID) -- no npm, pure Node.js crypto ───────────────────────────
+// Subscriptions stored in Upstash under bb:push-subs as an array.
+const VAPID_PUBLIC_KEY  = process.env.VAPID_PUBLIC_KEY  || '';
+const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || '';
+const VAPID_SUBJECT     = process.env.VAPID_SUBJECT     || 'mailto:admin@basketbattle.app';
+
+async function getPushSubs() {
+  const stored = await upstashGet('bb:push-subs');
+  return stored || [];
+}
+async function savePushSubs(subs) {
+  await upstashSet('bb:push-subs', subs);
+}
+async function addPushSub(sub) {
+  const subs = await getPushSubs();
+  // Avoid duplicates by endpoint
+  const filtered = subs.filter(s => s.endpoint !== sub.endpoint);
+  filtered.push(sub);
+  await savePushSubs(filtered);
+}
+async function removePushSub(endpoint) {
+  const subs = await getPushSubs();
+  await savePushSubs(subs.filter(s => s.endpoint !== endpoint));
+}
+
+// Build a VAPID JWT and send a Web Push notification
+async function sendPush(subscription, title, body) {
+  if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) return;
+  try {
+    const endpoint = new URL(subscription.endpoint);
+    const audience = endpoint.origin;
+
+    // ── Build VAPID JWT ──────────────────────────────────────────────────────
+    const header  = Buffer.from(JSON.stringify({ typ: 'JWT', alg: 'ES256' })).toString('base64url');
+    const payload = Buffer.from(JSON.stringify({
+      aud: audience,
+      exp: Math.floor(Date.now() / 1000) + 12 * 3600,
+      sub: VAPID_SUBJECT,
+    })).toString('base64url');
+
+    const signingInput = `${header}.${payload}`;
+    const privKeyDer   = Buffer.from(VAPID_PRIVATE_KEY, 'base64url');
+
+    // Import the raw EC private key
+    const { privateKey } = crypto.generateKeyPairSync('ec', {
+      namedCurve: 'prime256v1',
+      privateKeyEncoding: { type: 'pkcs8', format: 'der' },
+    });
+    // We need to build a proper PKCS8 DER from the raw key bytes
+    // PKCS8 EC key header for prime256v1 (fixed prefix)
+    const pkcs8Prefix = Buffer.from(
+      '308187020100301306072a8648ce3d020106082a8648ce3d030107046d306b0201010420',
+      'hex'
+    );
+    const pkcs8Key = Buffer.concat([pkcs8Prefix, privKeyDer,
+      Buffer.from('a144034200', 'hex'),
+      Buffer.from(VAPID_PUBLIC_KEY, 'base64url'),
+    ]);
+
+    const ecKey = crypto.createPrivateKey({ key: pkcs8Key, format: 'der', type: 'pkcs8' });
+    const sig   = crypto.sign('SHA256', Buffer.from(signingInput), { key: ecKey, dsaEncoding: 'ieee-p1363' });
+    const jwt   = `${signingInput}.${sig.toString('base64url')}`;
+
+    // ── Build notification payload ───────────────────────────────────────────
+    const notifPayload = JSON.stringify({ title, body, icon: '/icon.png', badge: '/icon.png' });
+
+    // ── Encrypt payload using Web Push encryption (RFC 8291) ────────────────
+    const { p256dh, auth: authSecret } = subscription.keys;
+    const recipientPublicKey = Buffer.from(p256dh, 'base64url');
+    const authSecretBuf      = Buffer.from(authSecret, 'base64url');
+
+    // Generate sender EC key pair
+    const { privateKey: senderPriv, publicKey: senderPub } = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+    const senderPubRaw = senderPub.export({ type: 'spki', format: 'der' }).slice(-65);
+
+    // ECDH shared secret
+    const recipKey = crypto.createPublicKey({
+      key: Buffer.concat([
+        Buffer.from('3059301306072a8648ce3d020106082a8648ce3d030107034200', 'hex'),
+        recipientPublicKey,
+      ]),
+      format: 'der', type: 'spki',
+    });
+    const sharedSecret = crypto.diffieHellman({ privateKey: senderPriv, publicKey: recipKey });
+
+    // HKDF-SHA256 helper
+    function hkdf(salt, ikm, info, len) {
+      const prk = crypto.createHmac('sha256', salt).update(ikm).digest();
+      const infoWithOne = Buffer.concat([Buffer.from(info), Buffer.from([1])]);
+      return crypto.createHmac('sha256', prk).update(infoWithOne).digest().slice(0, len);
+    }
+
+    const salt         = crypto.randomBytes(16);
+    const prk          = crypto.createHmac('sha256', authSecretBuf)
+      .update(Buffer.concat([sharedSecret, Buffer.alloc(1, 0), Buffer.from('Content-Encoding: auth\0'), Buffer.alloc(1, 1)]))
+      .digest();
+
+    // Content encryption key and nonce
+    const keyInfoBuf   = Buffer.concat([Buffer.from('Content-Encoding: aesgcm\0'), Buffer.alloc(1, 0), senderPubRaw, recipientPublicKey]);
+    const nonceInfoBuf = Buffer.concat([Buffer.from('Content-Encoding: nonce\0'), Buffer.alloc(1, 0), senderPubRaw, recipientPublicKey]);
+    const contentKey   = hkdf(salt, prk, keyInfoBuf, 16);
+    const nonce        = hkdf(salt, prk, nonceInfoBuf, 12);
+
+    // Encrypt
+    const cipher = crypto.createCipheriv('aes-128-gcm', contentKey, nonce);
+    const padded = Buffer.concat([Buffer.alloc(2, 0), Buffer.from(notifPayload)]);
+    const encrypted = Buffer.concat([cipher.update(padded), cipher.final(), cipher.getAuthTag()]);
+
+    // ── POST to push endpoint ────────────────────────────────────────────────
+    const pushHeaders = {
+      'Authorization': `vapid t=${jwt},k=${VAPID_PUBLIC_KEY}`,
+      'Content-Type': 'application/octet-stream',
+      'Content-Encoding': 'aesgcm',
+      'Encryption': `salt=${salt.toString('base64url')}`,
+      'Crypto-Key': `dh=${senderPubRaw.toString('base64url')};p256ecdsa=${VAPID_PUBLIC_KEY}`,
+      'TTL': '86400',
+      'Content-Length': String(encrypted.length),
+    };
+
+    await new Promise((resolve, reject) => {
+      const req = https.request(subscription.endpoint, { method: 'POST', headers: pushHeaders, agent }, (res) => {
+        res.resume();
+        if (res.statusCode === 410 || res.statusCode === 404) {
+          // Subscription expired — remove it
+          removePushSub(subscription.endpoint).catch(() => {});
+        }
+        resolve(res.statusCode);
+      });
+      req.on('error', reject);
+      req.write(encrypted);
+      req.end();
+    });
+  } catch(e) {
+    console.warn('[Push] sendPush error:', e.message);
+  }
+}
+
+async function sendPushToAll(title, body) {
+  const subs = await getPushSubs();
+  if (!subs.length) return;
+  await Promise.allSettled(subs.map(sub => sendPush(sub, title, body)));
 }
 
 function broadcast(event, data, targetCode) {
@@ -1560,6 +1705,7 @@ const server = http.createServer(async (req, res) => {
   <div class="header-logo">🛒</div>
   <div><div class="header-title">BB Admin</div><div class="header-sub">Invite management</div></div>
   <div class="online-dot" id="online-dot"></div>
+  <button id="push-btn" onclick="togglePush()" style="margin-left:10px;background:none;border:1.5px solid var(--border);border-radius:8px;padding:5px 10px;color:var(--muted);font-size:11px;cursor:pointer;font-family:'DM Mono',monospace">🔔 Off</button>
 </div>
 <div class="app">
   <div class="install-banner" id="install-banner">
@@ -1871,12 +2017,152 @@ async function deleteFeedback(id) {
   }
 }
 
-renderSlots(); renderUsers(); renderPending(); checkRedeemed(); loadFeedback();
+// ── Push notifications ────────────────────────────────────────────────
+var _pushSub = null;
+
+async function initPush() {
+  if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+    document.getElementById('push-btn').style.display = 'none';
+    return;
+  }
+  try {
+    // Register inline service worker for push handling
+    const swCode = \`
+self.addEventListener('push', function(e) {
+  var data = {};
+  try { data = e.data.json(); } catch(err) { data = { title: 'BasketBattle', body: e.data ? e.data.text() : 'New notification' }; }
+  e.waitUntil(self.registration.showNotification(data.title || 'BasketBattle', {
+    body: data.body || '',
+    icon: '/icon.png',
+    badge: '/icon.png',
+    vibrate: [200, 100, 200],
+  }));
+});
+self.addEventListener('notificationclick', function(e) {
+  e.notification.close();
+  e.waitUntil(clients.openWindow('/admin-panel?key=' + encodeURIComponent('${ADMIN_KEY}')));
+});
+\`;
+    const swBlob = new Blob([swCode], { type: 'application/javascript' });
+    const swUrl  = URL.createObjectURL(swBlob);
+    const reg    = await navigator.serviceWorker.register(swUrl);
+    await navigator.serviceWorker.ready;
+
+    // Check if already subscribed
+    _pushSub = await reg.pushManager.getSubscription();
+    updatePushBtn();
+  } catch(e) {
+    console.warn('[Push] init error:', e);
+  }
+}
+
+function updatePushBtn() {
+  const btn = document.getElementById('push-btn');
+  if (!btn) return;
+  if (_pushSub) {
+    btn.textContent = '🔔 On';
+    btn.style.borderColor = 'var(--green)';
+    btn.style.color = 'var(--green)';
+  } else {
+    btn.textContent = '🔔 Off';
+    btn.style.borderColor = 'var(--border)';
+    btn.style.color = 'var(--muted)';
+  }
+}
+
+async function togglePush() {
+  if (!('serviceWorker' in navigator)) { toast('Push not supported in this browser', 'error'); return; }
+  if (!isOnline()) { toast('No internet connection', 'error'); return; }
+
+  try {
+    const reg = await navigator.serviceWorker.ready;
+
+    if (_pushSub) {
+      // Unsubscribe
+      await _pushSub.unsubscribe();
+      await fetch(SERVER_URL + '/push/unsubscribe', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ adminKey: ADMIN_KEY, endpoint: _pushSub.endpoint }),
+      });
+      _pushSub = null;
+      updatePushBtn();
+      toast('Notifications off', '');
+      return;
+    }
+
+    // Subscribe
+    const permission = await Notification.requestPermission();
+    if (permission !== 'granted') { toast('Permission denied', 'error'); return; }
+
+    // Get VAPID public key from server
+    const keyRes  = await fetch(SERVER_URL + '/push/vapid-key');
+    const keyData = await keyRes.json();
+
+    _pushSub = await reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlBase64ToUint8Array(keyData.publicKey),
+    });
+
+    await fetch(SERVER_URL + '/push/subscribe', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ adminKey: ADMIN_KEY, subscription: _pushSub.toJSON() }),
+    });
+
+    updatePushBtn();
+    toast('Notifications on!', 'success');
+  } catch(e) {
+    toast('Push error: ' + e.message, 'error');
+  }
+}
+
+function urlBase64ToUint8Array(base64String) {
+  const padding = '='.repeat((4 - base64String.length % 4) % 4);
+  const base64  = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const raw     = window.atob(base64);
+  const arr     = new Uint8Array(raw.length);
+  for (var i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i);
+  return arr;
+}
+
+renderSlots(); renderUsers(); renderPending(); checkRedeemed(); loadFeedback(); initPush();
 </script>
 </body></html>`;
     res.writeHead(200, { "Content-Type": "text/html" });
     res.end(adminHtml);
     return;
+  }
+
+  // ── Push: get VAPID public key (needed by browser to subscribe) ──────────
+  if (path === "/push/vapid-key" && req.method === "GET") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ publicKey: VAPID_PUBLIC_KEY })); return;
+  }
+
+  // ── Push: register a subscription ────────────────────────────────────────
+  if (path === "/push/subscribe" && req.method === "POST") {
+    const body = await parseBody(req);
+    if (!ADMIN_KEY || body.adminKey !== ADMIN_KEY) {
+      res.writeHead(403, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Forbidden" })); return;
+    }
+    if (body.subscription) {
+      await addPushSub(body.subscription);
+      console.log('[Push] New subscription registered');
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true })); return;
+  }
+
+  // ── Push: unregister a subscription ──────────────────────────────────────
+  if (path === "/push/unsubscribe" && req.method === "POST") {
+    const body = await parseBody(req);
+    if (!ADMIN_KEY || body.adminKey !== ADMIN_KEY) {
+      res.writeHead(403, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Forbidden" })); return;
+    }
+    if (body.endpoint) await removePushSub(body.endpoint);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true })); return;
   }
 
   // ── Access gate — all routes below require a valid token ──────────────────
