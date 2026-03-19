@@ -1574,6 +1574,30 @@ const server = http.createServer(async (req, res) => {
     res.end(JSON.stringify({ ok: true })); return;
   }
 
+  // ── Admin: load users + pending from Upstash ─────────────────────────────
+  if (path === "/admin/data" && req.method === "POST") {
+    const body = await parseBody(req);
+    if (!ADMIN_KEY || body.adminKey !== ADMIN_KEY) {
+      res.writeHead(403, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Forbidden" })); return;
+    }
+    const stored = await upstashGet('bb:admin-data') || { users: [], pending: [] };
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true, users: stored.users || [], pending: stored.pending || [] })); return;
+  }
+
+  // ── Admin: save users + pending to Upstash ────────────────────────────────
+  if (path === "/admin/data/save" && req.method === "POST") {
+    const body = await parseBody(req);
+    if (!ADMIN_KEY || body.adminKey !== ADMIN_KEY) {
+      res.writeHead(403, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Forbidden" })); return;
+    }
+    await upstashSet('bb:admin-data', { users: body.users || [], pending: body.pending || [] });
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true })); return;
+  }
+
   // ── Admin: get all feedback ───────────────────────────────────────────────
   if (path === "/admin/feedback" && req.method === "POST") {
     const body = await parseBody(req);
@@ -1712,6 +1736,12 @@ const server = http.createServer(async (req, res) => {
     📱 <strong>Add to Home Screen</strong> to use as an app.<br>
     Safari: tap <strong>Share → Add to Home Screen</strong>
   </div>
+  <div id="migrate-banner" style="display:none;background:#1c1206;border:1px solid #78350f;border-radius:10px;padding:14px 16px;font-size:12px;color:#fbbf24;margin-bottom:20px;line-height:1.8">
+    📦 Found local data from a previous session.<br>
+    <button onclick="migrateLocalData()" style="margin-top:8px;background:#f59e0b;border:none;border-radius:8px;padding:8px 16px;color:#1a1100;font-weight:700;font-size:13px;cursor:pointer;width:100%">
+      Migrate to server →
+    </button>
+  </div>
   <div class="section">
     <div class="section-header"><span>🎟</span><span class="section-title">Generate Invite Codes</span></div>
     <div class="section-body">
@@ -1745,14 +1775,67 @@ const server = http.createServer(async (req, res) => {
 const ADMIN_KEY  = ${JSON.stringify(ADMIN_KEY)};
 const SERVER_URL = ${JSON.stringify('https://' + req.headers.host)};
 
-const LS_USERS   = 'bb_admin_users';
-const LS_PENDING = 'bb_admin_pending';
-let users   = JSON.parse(localStorage.getItem(LS_USERS)   || '[]');
-let pending = JSON.parse(localStorage.getItem(LS_PENDING) || '[]');
+let users   = [];
+let pending = [];
+let _dataLoaded = false;
 
-function save() {
-  localStorage.setItem(LS_USERS,   JSON.stringify(users));
-  localStorage.setItem(LS_PENDING, JSON.stringify(pending));
+async function loadAdminData() {
+  try {
+    const res = await fetch(SERVER_URL + '/admin/data', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ adminKey: ADMIN_KEY }),
+    });
+    if (!res.ok) return;
+    const data = await res.json();
+    users   = data.users   || [];
+    pending = data.pending || [];
+    _dataLoaded = true;
+    renderUsers();
+    renderPending();
+
+    // Show migration banner if localStorage has data the server doesn't
+    const lsUsers   = JSON.parse(localStorage.getItem('bb_admin_users')   || '[]');
+    const lsPending = JSON.parse(localStorage.getItem('bb_admin_pending') || '[]');
+    if ((lsUsers.length > 0 || lsPending.length > 0) && users.length === 0 && pending.length === 0) {
+      document.getElementById('migrate-banner').style.display = 'block';
+    }
+  } catch(e) {
+    console.warn('[Admin] loadAdminData error:', e.message);
+  }
+}
+
+async function migrateLocalData() {
+  const lsUsers   = JSON.parse(localStorage.getItem('bb_admin_users')   || '[]');
+  const lsPending = JSON.parse(localStorage.getItem('bb_admin_pending') || '[]');
+  if (!lsUsers.length && !lsPending.length) {
+    toast('Nothing to migrate', ''); return;
+  }
+  try {
+    users   = lsUsers;
+    pending = lsPending;
+    await save();
+    localStorage.removeItem('bb_admin_users');
+    localStorage.removeItem('bb_admin_pending');
+    document.getElementById('migrate-banner').style.display = 'none';
+    renderUsers();
+    renderPending();
+    toast('Migrated ' + lsUsers.length + ' user(s) to server', 'success');
+  } catch(e) {
+    toast('Migration failed: ' + e.message, 'error');
+  }
+}
+
+async function save() {
+  try {
+    await fetch(SERVER_URL + '/admin/data/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ adminKey: ADMIN_KEY, users, pending }),
+    });
+  } catch(e) {
+    console.warn('[Admin] save error:', e.message);
+  }
 }
 function toast(msg, type='') {
   const el = document.getElementById('toast');
@@ -2026,26 +2109,7 @@ async function initPush() {
     return;
   }
   try {
-    // Register inline service worker for push handling
-    const swCode = \`
-self.addEventListener('push', function(e) {
-  var data = {};
-  try { data = e.data.json(); } catch(err) { data = { title: 'BasketBattle', body: e.data ? e.data.text() : 'New notification' }; }
-  e.waitUntil(self.registration.showNotification(data.title || 'BasketBattle', {
-    body: data.body || '',
-    icon: '/icon.png',
-    badge: '/icon.png',
-    vibrate: [200, 100, 200],
-  }));
-});
-self.addEventListener('notificationclick', function(e) {
-  e.notification.close();
-  e.waitUntil(clients.openWindow('/admin-panel?key=' + encodeURIComponent('${ADMIN_KEY}')));
-});
-\`;
-    const swBlob = new Blob([swCode], { type: 'application/javascript' });
-    const swUrl  = URL.createObjectURL(swBlob);
-    const reg    = await navigator.serviceWorker.register(swUrl);
+    const reg = await navigator.serviceWorker.register(SERVER_URL + '/push-sw.js', { scope: '/' });
     await navigator.serviceWorker.ready;
 
     // Check if already subscribed
@@ -2124,12 +2188,50 @@ function urlBase64ToUint8Array(base64String) {
   return arr;
 }
 
-renderSlots(); renderUsers(); renderPending(); checkRedeemed(); loadFeedback(); initPush();
+renderSlots(); loadAdminData(); checkRedeemed(); loadFeedback(); initPush();
 </script>
 </body></html>`;
     res.writeHead(200, { "Content-Type": "text/html" });
     res.end(adminHtml);
     return;
+  }
+
+  // ── Push: service worker file ─────────────────────────────────────────────
+  if (path === "/push-sw.js" && req.method === "GET") {
+    const adminUrl = '/admin-panel?key=' + encodeURIComponent(ADMIN_KEY);
+    const swCode = `
+self.addEventListener('push', function(e) {
+  var data = {};
+  try { data = e.data.json(); } catch(err) {
+    data = { title: 'BasketBattle', body: e.data ? e.data.text() : 'New notification' };
+  }
+  e.waitUntil(self.registration.showNotification(data.title || 'BasketBattle', {
+    body: data.body || '',
+    icon: '/icon.png',
+    badge: '/icon.png',
+    vibrate: [200, 100, 200],
+    tag: 'bb-feedback',
+    renotify: true,
+  }));
+});
+self.addEventListener('notificationclick', function(e) {
+  e.notification.close();
+  e.waitUntil(clients.matchAll({ type: 'window', includeUncontrolled: true }).then(function(clientList) {
+    for (var i = 0; i < clientList.length; i++) {
+      if (clientList[i].url.includes('/admin-panel') && 'focus' in clientList[i]) {
+        return clientList[i].focus();
+      }
+    }
+    if (clients.openWindow) return clients.openWindow('${adminUrl}');
+  }));
+});
+`;
+    res.writeHead(200, {
+      'Content-Type': 'application/javascript',
+      'Service-Worker-Allowed': '/',
+      'Cache-Control': 'no-cache',
+    });
+    res.end(swCode); return;
   }
 
   // ── Push: get VAPID public key (needed by browser to subscribe) ──────────
