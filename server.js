@@ -1334,11 +1334,16 @@ async function addFeedback(entry) {
   sendPushToAll(`New feedback from ${entry.householdCode || 'unknown'}`, entry.message).catch(() => {});
 }
 
-// ── Web Push (VAPID) -- no npm, pure Node.js crypto ───────────────────────────
-// Subscriptions stored in Upstash under bb:push-subs as an array.
+// ── Web Push (VAPID via web-push package) ─────────────────────────────────────
+const webpush = require('web-push');
+
 const VAPID_PUBLIC_KEY  = process.env.VAPID_PUBLIC_KEY  || '';
 const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || '';
 const VAPID_SUBJECT     = process.env.VAPID_SUBJECT     || 'mailto:admin@basketbattle.app';
+
+if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
+  webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
+}
 
 async function getPushSubs() {
   const stored = await upstashGet('bb:push-subs');
@@ -1349,7 +1354,6 @@ async function savePushSubs(subs) {
 }
 async function addPushSub(sub) {
   const subs = await getPushSubs();
-  // Avoid duplicates by endpoint
   const filtered = subs.filter(s => s.endpoint !== sub.endpoint);
   filtered.push(sub);
   await savePushSubs(filtered);
@@ -1359,115 +1363,19 @@ async function removePushSub(endpoint) {
   await savePushSubs(subs.filter(s => s.endpoint !== endpoint));
 }
 
-// Build a VAPID JWT and send a Web Push notification
 async function sendPush(subscription, title, body) {
   if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) return;
   try {
-    const endpoint = new URL(subscription.endpoint);
-    const audience = endpoint.origin;
-
-    // ── Build VAPID JWT ──────────────────────────────────────────────────────
-    const header  = Buffer.from(JSON.stringify({ typ: 'JWT', alg: 'ES256' })).toString('base64url');
-    const payload = Buffer.from(JSON.stringify({
-      aud: audience,
-      exp: Math.floor(Date.now() / 1000) + 12 * 3600,
-      sub: VAPID_SUBJECT,
-    })).toString('base64url');
-
-    const signingInput = `${header}.${payload}`;
-    const privKeyDer   = Buffer.from(VAPID_PRIVATE_KEY, 'base64url');
-
-    // Import the raw EC private key
-    const { privateKey } = crypto.generateKeyPairSync('ec', {
-      namedCurve: 'prime256v1',
-      privateKeyEncoding: { type: 'pkcs8', format: 'der' },
-    });
-    // We need to build a proper PKCS8 DER from the raw key bytes
-    // PKCS8 EC key header for prime256v1 (fixed prefix)
-    const pkcs8Prefix = Buffer.from(
-      '308187020100301306072a8648ce3d020106082a8648ce3d030107046d306b0201010420',
-      'hex'
+    await webpush.sendNotification(
+      subscription,
+      JSON.stringify({ title, body, icon: '/icon.png', badge: '/icon.png' })
     );
-    const pkcs8Key = Buffer.concat([pkcs8Prefix, privKeyDer,
-      Buffer.from('a144034200', 'hex'),
-      Buffer.from(VAPID_PUBLIC_KEY, 'base64url'),
-    ]);
-
-    const ecKey = crypto.createPrivateKey({ key: pkcs8Key, format: 'der', type: 'pkcs8' });
-    const sig   = crypto.sign('SHA256', Buffer.from(signingInput), { key: ecKey, dsaEncoding: 'ieee-p1363' });
-    const jwt   = `${signingInput}.${sig.toString('base64url')}`;
-
-    // ── Build notification payload ───────────────────────────────────────────
-    const notifPayload = JSON.stringify({ title, body, icon: '/icon.png', badge: '/icon.png' });
-
-    // ── Encrypt payload using Web Push encryption (RFC 8291) ────────────────
-    const { p256dh, auth: authSecret } = subscription.keys;
-    const recipientPublicKey = Buffer.from(p256dh, 'base64url');
-    const authSecretBuf      = Buffer.from(authSecret, 'base64url');
-
-    // Generate sender EC key pair
-    const { privateKey: senderPriv, publicKey: senderPub } = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
-    const senderPubRaw = senderPub.export({ type: 'spki', format: 'der' }).slice(-65);
-
-    // ECDH shared secret
-    const recipKey = crypto.createPublicKey({
-      key: Buffer.concat([
-        Buffer.from('3059301306072a8648ce3d020106082a8648ce3d030107034200', 'hex'),
-        recipientPublicKey,
-      ]),
-      format: 'der', type: 'spki',
-    });
-    const sharedSecret = crypto.diffieHellman({ privateKey: senderPriv, publicKey: recipKey });
-
-    // HKDF-SHA256 helper
-    function hkdf(salt, ikm, info, len) {
-      const prk = crypto.createHmac('sha256', salt).update(ikm).digest();
-      const infoWithOne = Buffer.concat([Buffer.from(info), Buffer.from([1])]);
-      return crypto.createHmac('sha256', prk).update(infoWithOne).digest().slice(0, len);
-    }
-
-    const salt         = crypto.randomBytes(16);
-    const prk          = crypto.createHmac('sha256', authSecretBuf)
-      .update(Buffer.concat([sharedSecret, Buffer.alloc(1, 0), Buffer.from('Content-Encoding: auth\0'), Buffer.alloc(1, 1)]))
-      .digest();
-
-    // Content encryption key and nonce
-    const keyInfoBuf   = Buffer.concat([Buffer.from('Content-Encoding: aesgcm\0'), Buffer.alloc(1, 0), senderPubRaw, recipientPublicKey]);
-    const nonceInfoBuf = Buffer.concat([Buffer.from('Content-Encoding: nonce\0'), Buffer.alloc(1, 0), senderPubRaw, recipientPublicKey]);
-    const contentKey   = hkdf(salt, prk, keyInfoBuf, 16);
-    const nonce        = hkdf(salt, prk, nonceInfoBuf, 12);
-
-    // Encrypt
-    const cipher = crypto.createCipheriv('aes-128-gcm', contentKey, nonce);
-    const padded = Buffer.concat([Buffer.alloc(2, 0), Buffer.from(notifPayload)]);
-    const encrypted = Buffer.concat([cipher.update(padded), cipher.final(), cipher.getAuthTag()]);
-
-    // ── POST to push endpoint ────────────────────────────────────────────────
-    const pushHeaders = {
-      'Authorization': `vapid t=${jwt},k=${VAPID_PUBLIC_KEY}`,
-      'Content-Type': 'application/octet-stream',
-      'Content-Encoding': 'aesgcm',
-      'Encryption': `salt=${salt.toString('base64url')}`,
-      'Crypto-Key': `dh=${senderPubRaw.toString('base64url')};p256ecdsa=${VAPID_PUBLIC_KEY}`,
-      'TTL': '86400',
-      'Content-Length': String(encrypted.length),
-    };
-
-    await new Promise((resolve, reject) => {
-      const req = https.request(subscription.endpoint, { method: 'POST', headers: pushHeaders, agent }, (res) => {
-        res.resume();
-        if (res.statusCode === 410 || res.statusCode === 404) {
-          // Subscription expired — remove it
-          removePushSub(subscription.endpoint).catch(() => {});
-        }
-        resolve(res.statusCode);
-      });
-      req.on('error', reject);
-      req.write(encrypted);
-      req.end();
-    });
   } catch(e) {
-    console.warn('[Push] sendPush error:', e.message);
+    console.warn('[Push] sendPush error:', e.statusCode, e.message);
+    if (e.statusCode === 410 || e.statusCode === 404) {
+      // Subscription expired — remove it
+      await removePushSub(subscription.endpoint);
+    }
   }
 }
 
