@@ -1,10 +1,20 @@
 const http = require("http");
 const https = require("https");
 const fs = require("fs");
+const webpush = require('web-push');
 
 // v2 — invite/access system + Upstash persistence
 const PORT = 3000;
 const ADMIN_KEY = process.env.BB_ADMIN_KEY || "";
+const VAPID_PUBLIC_KEY  = process.env.VAPID_PUBLIC_KEY  || '';
+const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || '';
+const VAPID_SUBJECT     = process.env.VAPID_SUBJECT     || 'mailto:admin@basketbattle.app';
+if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
+  webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
+  console.log('[Startup] VAPID configured');
+} else {
+  console.log('[Startup] VAPID not configured -- push notifications disabled');
+}
 console.log('[Startup] ADMIN_KEY set:', !!ADMIN_KEY, '| UPSTASH set:', !!process.env.UPSTASH_REDIS_REST_URL);
 const agent = new https.Agent({ rejectUnauthorized: false });
 
@@ -1335,15 +1345,6 @@ async function addFeedback(entry) {
 }
 
 // ── Web Push (VAPID via web-push package) ─────────────────────────────────────
-const webpush = require('web-push');
-
-const VAPID_PUBLIC_KEY  = process.env.VAPID_PUBLIC_KEY  || '';
-const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || '';
-const VAPID_SUBJECT     = process.env.VAPID_SUBJECT     || 'mailto:admin@basketbattle.app';
-
-if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
-  webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
-}
 
 async function getPushSubs() {
   const stored = await upstashGet('bb:push-subs');
@@ -1364,16 +1365,20 @@ async function removePushSub(endpoint) {
 }
 
 async function sendPush(subscription, title, body) {
-  if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) return;
+  if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) {
+    console.warn('[Push] Skipping -- VAPID keys not set');
+    return;
+  }
   try {
     await webpush.sendNotification(
       subscription,
       JSON.stringify({ title, body, icon: '/icon.png', badge: '/icon.png' })
     );
+    console.log('[Push] Sent successfully to', subscription.endpoint.slice(0, 50) + '...');
   } catch(e) {
     console.warn('[Push] sendPush error:', e.statusCode, e.message);
     if (e.statusCode === 410 || e.statusCode === 404) {
-      // Subscription expired — remove it
+      console.log('[Push] Subscription expired, removing');
       await removePushSub(subscription.endpoint);
     }
   }
@@ -1381,6 +1386,7 @@ async function sendPush(subscription, title, body) {
 
 async function sendPushToAll(title, body) {
   const subs = await getPushSubs();
+  console.log('[Push] sendPushToAll -- subs count:', subs.length, '| title:', title);
   if (!subs.length) return;
   await Promise.allSettled(subs.map(sub => sendPush(sub, title, body)));
 }
